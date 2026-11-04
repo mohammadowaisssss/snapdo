@@ -3,10 +3,12 @@
    ===================================================================== */
 import { $, $$, TODAY, addD, dOff, esc, fmtDate, iso, parse, uid } from '../core/utils.js';
 import { PR, PSTAT, ST } from '../core/constants.js';
+import { ic } from '../core/icons.js';
 import { seed } from '../data/seed.js';
 import { api } from '../core/api.js';
-import { signInWithGooglePopup, signOutFromFirebase } from '../core/firebase.js';
-import { D, DEFAULT_PREFS, S, allTasks, applyAuthenticatedUser, canSee, commentsOf, logAct, me, mem, proj, save, task, tasksOf, visibleProjects } from '../core/store.js';
+import { applyMarkdownCommand, normalizeHtmlToMarkdown } from '../core/markdown.ts';
+import { authorizeGmailSenderPopup, getGmailAccessToken, getGoogleSenderEmail, signInWithGooglePopup, signOutFromFirebase } from '../core/firebase.js';
+import { D, DEFAULT_PREFS, S, allTasks, applyAuthenticatedUser, canSee, commentsOf, logAct, me, mem, pColor, progressOf, proj, save, task, tasksOf, visibleProjects } from '../core/store.js';
 import { fileType, fsize } from '../ui/helpers.js';
 import { effectiveDark } from '../core/theme.js';
 import { mutate, toast } from '../ui/toast.js';
@@ -21,6 +23,115 @@ export const A = {},
   KEY = {},
   DBL = {},
   BLUR = {};
+
+/* ---------- Stylish Task Completion ("Done") Celebration & Confetti ---------- */
+const PRAISE_HEADLINES = [
+  'Congratulations! Task Completed',
+  'Awesome Work! Another One Done',
+  'Milestone Crushed! Task Done',
+  'Boom! Shipped & Completed',
+];
+
+export function launchConfetti() {
+  if (typeof document === 'undefined') return;
+  let stage = document.getElementById('confetti-stage');
+  if (stage) stage.remove();
+  stage = document.createElement('div');
+  stage.id = 'confetti-stage';
+  stage.className = 'confetti-stage';
+  stage.setAttribute('aria-hidden', 'true');
+  const colors = ['#10B981', '#6366F1', '#F59E0B', '#EC4899', '#3B82F6', '#8B5CF6', '#14B8A6'];
+  const count = 46;
+  let pieces = '';
+  for (let i = 0; i < count; i++) {
+    const c = colors[i % colors.length];
+    const left = 18 + Math.random() * 64;
+    const dx = (Math.random() - 0.5) * 340;
+    const dy = -110 - Math.random() * 190;
+    const rot = Math.round(Math.random() * 720 - 360);
+    const delay = (Math.random() * 0.16).toFixed(3);
+    const dur = (0.95 + Math.random() * 0.65).toFixed(2);
+    const shape = i % 3 === 0 ? 'border-radius:50%;width:8px;height:8px' : i % 3 === 1 ? 'width:10px;height:5px;border-radius:2px' : 'width:7px;height:7px;border-radius:2px';
+    pieces += `<i class="confetti-piece" style="--c:${c};--x:${left}%;--dx:${dx}px;--dy:${dy}px;--rot:${rot}deg;--delay:${delay}s;--dur:${dur}s;${shape}"></i>`;
+  }
+  stage.innerHTML = pieces;
+  document.body.appendChild(stage);
+  setTimeout(() => stage.remove(), 1900);
+}
+
+export function triggerTaskCelebration(t) {
+  if (typeof document === 'undefined' || !t) return;
+  clearTimeout(triggerTaskCelebration._timer);
+  launchConfetti();
+
+  const p = proj(t.project);
+  const pTasks = p ? tasksOf(p.id) : [];
+  const doneCount = pTasks.filter(x => x.status === 'done').length;
+  const totalCount = pTasks.length || 1;
+  const pct = p ? progressOf(p.id) : 100;
+  const headline = PRAISE_HEADLINES[doneCount % PRAISE_HEADLINES.length];
+
+  let pop = document.getElementById('celebration-pop');
+  if (!pop) {
+    pop = document.createElement('div');
+    pop.id = 'celebration-pop';
+    document.body.appendChild(pop);
+  }
+  pop.className = 'celebrate-wrap';
+  pop.setAttribute('role', 'status');
+  pop.setAttribute('aria-live', 'polite');
+  pop.setAttribute('data-testid', 'done-celebration');
+  pop.innerHTML = `
+    <div class="celebrate-card">
+      <div class="celebrate-glow"></div>
+      <div class="celebrate-badge" aria-hidden="true">
+        <span class="celebrate-trophy">${ic('sparkles', 18)}</span>
+      </div>
+      <div class="celebrate-body">
+        <div class="celebrate-kicker">
+          <span class="celebrate-pill">🎉 Completed</span>
+          <span class="mono celebrate-key">${esc(t.key || '')}</span>
+        </div>
+        <div class="celebrate-title">${esc(headline)}</div>
+        <div class="celebrate-sub">“<b>${esc(t.title)}</b>” moved to <b>Done</b></div>
+        ${
+          p
+            ? `<div class="celebrate-prog">
+                <div class="row" style="justify-content:space-between;font-size:11.5px;margin-bottom:4px">
+                  <span class="row" style="gap:5px"><span class="pdot" style="--c:${pColor(p)}"></span><b>${esc(p.name)}</b></span>
+                  <span class="num" style="font-weight:600;color:var(--green)">${pct}% complete (${doneCount}/${totalCount})</span>
+                </div>
+                <div class="celebrate-bar"><i style="width:${pct}%"></i></div>
+              </div>`
+            : ''
+        }
+      </div>
+      <div class="celebrate-actions">
+        <button type="button" class="btn btn-xs btn-secondary" data-a="undoCelebrateDone" data-id="${esc(t.id)}">Undo</button>
+        <button type="button" class="ibtn ibtn-xs" data-a="dismissCelebration" aria-label="Dismiss celebration">${ic('x', 14)}</button>
+      </div>
+    </div>
+  `;
+
+  triggerTaskCelebration._timer = setTimeout(() => {
+    const cur = document.getElementById('celebration-pop');
+    if (cur) {
+      cur.classList.add('out');
+      setTimeout(() => cur.remove(), 260);
+    }
+  }, 5200);
+}
+
+A.dismissCelebration = () => {
+  clearTimeout(triggerTaskCelebration._timer);
+  const cur = document.getElementById('celebration-pop');
+  if (cur) cur.remove();
+};
+A.undoCelebrateDone = el => {
+  A.dismissCelebration();
+  const t = task(el.dataset.id);
+  if (t) updateTask(t.id, { status: t.prevStatus && t.prevStatus !== 'done' ? t.prevStatus : 'todo' });
+};
 
 /* ---------- task mutations ---------- */
 export function nextKey(p) {
@@ -75,6 +186,7 @@ export function applyPatch(t, patch) {
         t.prevStatus = old;
         logAct('completed', t);
         fxSet({ done: t.id });
+        setTimeout(() => triggerTaskCelebration(t), 20);
       } else logAct('moved', t, `from ${ST[old].name} to ${ST[nv].name}`);
       if (nv === 'done' && t.recur && t.due) {
         const nd = iso(addD(parse(t.due), RECUR_DAYS[t.recur] || 7));
@@ -524,10 +636,7 @@ A.editTask = el => {
   if (!t) return;
   S.ui.form = {
     title: t.title,
-    desc: (t.desc || '')
-      .replace(/<[^>]+>/g, ' ')
-      .replace(/\s+/g, ' ')
-      .trim(),
+    desc: normalizeHtmlToMarkdown(t.desc || ''),
     project: t.project,
     status: t.status,
     assignee: t.assignee,
@@ -695,14 +804,9 @@ A.submitTask = () => {
     if (
       !mutate(() => {
         applyPatch(t, base);
-        if (
-          f.desc !==
-          (t.desc || '')
-            .replace(/<[^>]+>/g, ' ')
-            .replace(/\s+/g, ' ')
-            .trim()
-        )
-          t.desc = f.desc ? `<p>${esc(f.desc)}</p>` : '';
+        if (f.desc !== normalizeHtmlToMarkdown(t.desc || '')) {
+          t.desc = f.desc || '';
+        }
         t.attachments.push(...files);
         files.forEach(x => {
           if (!D().files.some(ef => ef.id === x.id)) {
@@ -720,7 +824,7 @@ A.submitTask = () => {
   let t;
   if (
     !mutate(() => {
-      t = createTask({ ...base, desc: f.desc ? `<p>${esc(f.desc)}</p>` : '', attachments: files });
+      t = createTask({ ...base, desc: f.desc || '', attachments: files });
       files.forEach(x => D().files.unshift({ ...x, project: t.project, task: t.id }));
     })
   )
@@ -1092,6 +1196,10 @@ A.postComment = el => {
       );
       S.ui.drafts[id] = '';
       if (S.ui.commentFiles) S.ui.commentFiles[id] = [];
+      if (S.ui.mdPrev) {
+        delete S.ui.mdPrev['cmt:' + id];
+        delete S.ui.mdPrev['inbox:' + id];
+      }
       S.ui.mention = null;
       S.ui.drawerTab = 'comments';
     })
@@ -1120,34 +1228,107 @@ A.react = el => {
   });
 };
 
-/* rich text description */
-document.addEventListener('mousedown', e => {
-  const b = e.target.closest('[data-cmd]');
-  if (!b) return;
-  e.preventDefault();
-  const [cmd, arg] = b.dataset.cmd.split(':');
-  if (cmd === 'createLink') {
-    const s = String(getSelection());
-    if (/^https?:\/\//.test(s)) document.execCommand('createLink', false, s);
-    else toast('Select a URL starting with https:// to turn it into a link', { kind: 'info' });
-  } else document.execCommand(cmd, false, arg ? `<${arg}>` : null);
-  const ed = $('#d-desc');
-  if (ed) {
-    const t = task(ed.dataset.rte);
-    t.desc = ed.innerHTML;
-    save();
+/* ---------- Markdown Toolbar, Preview & Task Description ---------- */
+function syncTextareaState(ta) {
+  if (!ta) return;
+  const inType = ta.dataset.in;
+  if (inType === 'draft' && ta.dataset.id) {
+    S.ui.drafts[ta.dataset.id] = ta.value;
+  } else if (inType === 'taskDesc' && ta.dataset.id) {
+    const t = task(ta.dataset.id);
+    if (t) {
+      t.desc = ta.value;
+      t.updated = Date.now();
+      save();
+    }
+  } else if (inType === 'form' && ta.dataset.f) {
+    S.ui.form[ta.dataset.f] = ta.value;
+  } else if (inType === 'pform' && ta.dataset.f) {
+    S.ui.pform[ta.dataset.f] = ta.value;
+  } else if (inType === 'subNote' && ta.dataset.id && ta.dataset.sid) {
+    const t = task(ta.dataset.id);
+    const s = t?.subtasks?.find(x => x.id === ta.dataset.sid);
+    if (s) {
+      s.note = ta.value;
+      save();
+    }
   }
-});
-document.addEventListener('input', e => {
-  const ed = e.target.closest?.('[data-rte]');
-  if (!ed) return;
-  const t = task(ed.dataset.rte);
-  if (t) {
-    t.desc = ed.innerHTML;
+}
+
+A.mdFmt = el => {
+  const targetId = el.dataset.target;
+  const cmd = el.dataset.cmd;
+  const ta = document.getElementById(targetId);
+  if (!ta) return;
+  const start = ta.selectionStart ?? ta.value.length;
+  const end = ta.selectionEnd ?? ta.value.length;
+  const res = applyMarkdownCommand(ta.value, start, end, cmd);
+  ta.value = res.value;
+  syncTextareaState(ta);
+  ta.focus();
+  try {
+    ta.setSelectionRange(res.selectionStart, res.selectionEnd);
+  } catch {
+    /* safe to ignore */
+  }
+  if (ta.dataset.autosize != null) autosize(ta);
+};
+
+A.toggleMdPreview = el => {
+  const k = el.dataset.k;
+  if (!k) return;
+  S.ui.mdPrev = S.ui.mdPrev || {};
+  // Sync any active textarea value before toggling into preview
+  ['d-cmt', 'd-desc', 'f-desc', 'p-desc', 's-note', 'inbox-reply'].forEach(id => {
+    const ta = document.getElementById(id);
+    if (ta) syncTextareaState(ta);
+  });
+  S.ui.mdPrev[k] = !S.ui.mdPrev[k];
+  render();
+};
+
+A.editTaskDesc = (el, e) => {
+  if (e?.target?.closest('a')) return;
+  const id = el.dataset.id;
+  const t = task(id);
+  if (!t) return;
+  t.desc = normalizeHtmlToMarkdown(t.desc || '');
+  S.ui.descEdit = id;
+  S.ui.editDesc = id;
+  render();
+  setTimeout(() => {
+    const ta = $('#d-desc');
+    if (ta) {
+      autosize(ta);
+      ta.focus();
+      ta.setSelectionRange(ta.value.length, ta.value.length);
+    }
+  }, 15);
+};
+
+A.finishTaskDesc = el => {
+  const id = el.dataset.id;
+  const t = task(id);
+  const ta = $('#d-desc');
+  if (t && ta) {
+    t.desc = ta.value;
     t.updated = Date.now();
     save();
   }
-});
+  S.ui.descEdit = null;
+  S.ui.editDesc = null;
+  render();
+};
+
+IN.taskDesc = el => {
+  const t = task(el.dataset.id);
+  if (t) {
+    t.desc = el.value;
+    t.updated = Date.now();
+    save();
+  }
+  if (el.dataset.autosize != null) autosize(el);
+};
 
 /* selection & bulk */
 A.selRow = el => {
@@ -1750,7 +1931,15 @@ A.shareInvite = async () => {
     onAction: () => openModal({ type: 'emailPreview', email: outboxMsg }),
   });
   api
-    .inviteMembers({ emails: [v], role: 'Guest', team: p.team, baseUrl: location.origin, projectName: p.name })
+    .inviteMembers({
+      emails: [v],
+      role: 'Guest',
+      team: p.team,
+      baseUrl: location.origin,
+      projectName: p.name,
+      googleAccessToken: getGmailAccessToken(),
+      senderEmail: getGoogleSenderEmail(),
+    })
     .then(res => {
       if (res?.emailsSent?.[0] && outboxMsg) {
         Object.assign(outboxMsg, res.emailsSent[0]);
@@ -1788,6 +1977,130 @@ A.invite = () => {
   S.ui.errors = {};
   S.ui.pop = null;
   openModal({ type: 'invite' });
+};
+A.toggleSmtpForm = () => {
+  S.ui.showSmtpForm = !S.ui.showSmtpForm;
+  if (S.ui.errors) delete S.ui.errors.smtp;
+  render();
+};
+A.connectGmailOAuth = async el => {
+  if (el) el.classList.add('is-loading');
+  try {
+    const authRes = await authorizeGmailSenderPopup();
+    if (el) el.classList.remove('is-loading');
+    render();
+    toast(`Connected Google Mail (${authRes.email}) for direct inbox delivery!`);
+  } catch (err) {
+    if (el) el.classList.remove('is-loading');
+    toast(err?.message || 'Google Mail authorization was cancelled.', { kind: 'err' });
+  }
+};
+A.deliverViaGoogleOAuth = async el => {
+  const msgId = el.dataset.id;
+  const topModal = S.ui.modals?.[S.ui.modals.length - 1];
+  const msg =
+    (topModal?.type === 'emailPreview' && topModal.email) ||
+    (D().outbox || []).find(x => x.id === msgId);
+  if (!msg) return;
+
+  el.classList.add('is-loading');
+  try {
+    let token = getGmailAccessToken();
+    let senderEmail = getGoogleSenderEmail();
+    if (!token) {
+      const authRes = await authorizeGmailSenderPopup();
+      token = authRes.accessToken;
+      senderEmail = authRes.email;
+    }
+    const targetMember =
+      mem(msg.memberId) ||
+      (D().members || []).find(x => x.email.toLowerCase() === msg.to.toLowerCase());
+    let res;
+    if (targetMember) {
+      res = await api.resendInvite(targetMember.id, {
+        baseUrl: location.origin,
+        googleAccessToken: token,
+        senderEmail,
+      });
+    } else {
+      res = await api.inviteMembers({
+        emails: [msg.to],
+        role: msg.role || 'Member',
+        team: msg.team || 'product',
+        baseUrl: location.origin,
+        googleAccessToken: token,
+        senderEmail,
+      });
+    }
+    const srvEmail = res?.email || res?.emailsSent?.[0];
+    if (srvEmail) {
+      Object.assign(msg, srvEmail);
+      const inOutbox = (D().outbox || []).find(x => x.id === msg.id || x.to === msg.to);
+      if (inOutbox) Object.assign(inOutbox, srvEmail);
+      save();
+    }
+    el.classList.remove('is-loading');
+    render();
+    if (msg.deliveredToInbox) {
+      toast(`Delivered directly to ${msg.to}'s Gmail inbox!`);
+    } else {
+      window.open(msg.gmailComposeUrl, '_blank', 'noopener,noreferrer');
+      toast(`Opened Gmail with pre-filled invitation to ${msg.to}`);
+    }
+  } catch (err) {
+    el.classList.remove('is-loading');
+    render();
+    toast(err?.message || 'Could not authorize Google Mail — opening Gmail Compose instead.', { kind: 'info' });
+    if (msg.gmailComposeUrl) {
+      window.open(msg.gmailComposeUrl, '_blank', 'noopener,noreferrer');
+    }
+  }
+};
+A.saveSmtpConfig = async () => {
+  const user = ($('#smtp-user')?.value || '').trim();
+  const pass = ($('#smtp-pass')?.value || '').trim();
+  const host = ($('#smtp-host')?.value || 'smtp.gmail.com').trim();
+  const port = Number($('#smtp-port')?.value || 465);
+  S.ui.errors = S.ui.errors || {};
+  delete S.ui.errors.smtp;
+  if (!user || !pass) {
+    S.ui.errors.smtp = 'Enter both your Gmail/SMTP address and App Password.';
+    render();
+    return;
+  }
+  const btn = $('#smtp-save-btn');
+  if (btn) btn.classList.add('is-loading');
+  try {
+    await api.saveSmtpConfig({ host, port, user, pass, fromEmail: user });
+    D().smtpConfig = { host, port, user, pass, fromEmail: user };
+    S.ui.showSmtpForm = false;
+    save();
+    // If an email preview modal is open, immediately re-send that invitation through the verified SMTP server!
+    const topModal = S.ui.modals?.[S.ui.modals.length - 1];
+    if (topModal?.type === 'emailPreview' && topModal.email) {
+      const msg = topModal.email;
+      const targetMember =
+        mem(msg.memberId) ||
+        (D().members || []).find(x => x.email.toLowerCase() === msg.to.toLowerCase());
+      const res = targetMember
+        ? await api.resendInvite(targetMember.id, { baseUrl: location.origin })
+        : await api.inviteMembers({ emails: [msg.to], role: msg.role, team: msg.team, baseUrl: location.origin });
+      const srvEmail = res?.email || res?.emailsSent?.[0];
+      if (srvEmail) {
+        Object.assign(msg, srvEmail);
+        save();
+      }
+      render();
+      toast(`SMTP verified & invitation delivered directly to ${msg.to}!`);
+      return;
+    }
+    render();
+    toast(`SMTP verified (${user})! Future invites will deliver directly to Gmail inboxes.`);
+  } catch (err) {
+    if (btn) btn.classList.remove('is-loading');
+    S.ui.errors.smtp = err?.message || 'SMTP verification failed. Check your Gmail address and 16-character App Password.';
+    render();
+  }
 };
 A.submitInvite = () => {
   const raw = $('#inv-emails').value;
@@ -1852,10 +2165,17 @@ A.submitInvite = () => {
     } else {
       render();
     }
-    toast(`${list.length} invitation email${list.length > 1 ? 's' : ''} sent`);
+    toast(`${list.length} invitation email${list.length > 1 ? 's' : ''} dispatched`);
 
     try {
-      const res = await api.inviteMembers({ emails: list, role, team, baseUrl: location.origin });
+      const res = await api.inviteMembers({
+        emails: list,
+        role,
+        team,
+        baseUrl: location.origin,
+        googleAccessToken: getGmailAccessToken(),
+        senderEmail: getGoogleSenderEmail(),
+      });
       if (res?.emailsSent?.length) {
         res.emailsSent.forEach((srvMsg, idx) => {
           if (createdMsgs[idx]) {
@@ -1887,7 +2207,11 @@ A.resendInvite = async el => {
     onAction: () => openModal({ type: 'emailPreview', email: msg }),
   });
   try {
-    const res = await api.resendInvite(m.id, { baseUrl: location.origin });
+    const res = await api.resendInvite(m.id, {
+      baseUrl: location.origin,
+      googleAccessToken: getGmailAccessToken(),
+      senderEmail: getGoogleSenderEmail(),
+    });
     if (res?.email) {
       Object.assign(msg, res.email);
       save();

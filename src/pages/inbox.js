@@ -2,7 +2,7 @@
 import { MOD, ago, esc } from '../core/utils.js';
 import { ic } from '../core/icons.js';
 import { D, S, commentsOf, mem, pColor, proj, task } from '../core/store.js';
-import { av, empty, fmtComment } from '../ui/helpers.js';
+import { av, empty, fmtComment, mdToolbar } from '../ui/helpers.js';
 import { cellAssignee, cellDue, cellPrio, cellStatus } from '../components/task-list.js';
 import { commentHtml } from '../overlays/drawer.js';
 
@@ -60,7 +60,7 @@ export function inboxItem(n, on) {
     ${notifIcon(n)}
     <div class="grow" style="font-size:13px;line-height:1.45">
       <div>${notifText(n)}</div>
-      <div class="trunc muted" style="font-size:12.5px;margin-top:2px">${fmtComment(n.snippet)}</div>
+      <div class="trunc muted" style="font-size:12.5px;margin-top:2px">${fmtComment(n.snippet, { inline: true })}</div>
       <div class="row" style="gap:6px;margin-top:5px;font-size:11.5px;color:var(--text-3)">${ic(typeIc, 11)}${p ? `<span class="pdot" style="--c:${pColor(p)};width:6px;height:6px"></span>${esc(p.name)}` : ''}<span>·</span><span>${ago(n.at)}</span></div>
     </div>
     <button class="ibtn ibtn-xs" data-a="toggleRead" data-id="${n.id}" data-tip="${n.read ? 'Mark as unread' : 'Mark as read'}" aria-label="${n.read ? 'Mark as unread' : 'Mark as read'}">${ic(n.read ? 'mail' : 'mail-open', 13)}</button>
@@ -70,8 +70,9 @@ export function inboxPreview(n) {
   const t = n.task ? task(n.task) : null;
   const p = n.project ? proj(n.project) : t ? proj(t.project) : null;
   if (!t)
-    return `<div style="padding:24px 28px"><button class="btn btn-sm btn-ghost" data-a="set" data-k="inboxSel" data-v="" style="margin:-4px 0 12px -8px">${ic('arrow-left', 14)}Back</button><div class="alert danger">${ic('triangle-alert', 16)}<div><b>${esc(n.text)}</b><div class="muted" style="margin-top:2px">${esc(n.snippet)}</div></div></div><div style="margin-top:14px"><button class="btn btn-secondary" data-a="go" data-r="project" data-id="${p.id}" data-tab="overview">Open project</button></div></div>`;
+    return `<div style="padding:24px 28px"><button class="btn btn-sm btn-ghost" data-a="set" data-k="inboxSel" data-v="" style="margin:-4px 0 12px -8px">${ic('arrow-left', 14)}Back</button><div class="alert danger">${ic('triangle-alert', 16)}<div><b>${esc(n.text)}</b><div class="muted" style="margin-top:2px">${fmtComment(n.snippet)}</div></div></div><div style="margin-top:14px"><button class="btn btn-secondary" data-a="go" data-r="project" data-id="${p.id}" data-tab="overview">Open project</button></div></div>`;
   const cs = commentsOf(t.id).slice(-4);
+  const cmtPrev = S.ui.mdPrev?.['inbox:' + t.id];
   return `<div class="row" style="height:46px;padding:0 16px;border-bottom:1px solid var(--border);gap:8px;flex-shrink:0">
       <button class="ibtn ibtn-sm" data-a="set" data-k="inboxSel" data-v="" aria-label="Back">${ic('arrow-left', 15)}</button>
       <span class="pdot" style="--c:${pColor(p)}"></span><span class="muted" style="font-size:12.5px">${esc(p.name)}</span><span class="faint mono">${t.key}</span><span class="sp"></span>
@@ -80,8 +81,14 @@ export function inboxPreview(n) {
       <h2 style="font-size:var(--fs-xl);margin:0 0 10px;font-weight:600;letter-spacing:-.015em">${esc(t.title)}</h2>
       <div class="row" style="flex-wrap:wrap;gap:4px;margin-bottom:18px">${cellStatus(t)}${cellAssignee(t)}${cellPrio(t)}${cellDue(t)}</div>
       <div class="eyebrow" style="margin-bottom:4px">Conversation</div>
-      ${cs.length ? cs.map(commentHtml).join('') : `<p class="muted">${esc(n.snippet)}</p>`}
-      <div class="cbox" data-comment-box="${t.id}" style="margin-top:10px"><textarea id="inbox-reply" data-in="draft" data-id="${t.id}" data-key-mod-enter="postComment" placeholder="Reply… use @ to mention or ${MOD}+V to paste files" aria-label="Reply">${esc(S.ui.drafts[t.id] || '')}</textarea>
+      ${cs.length ? cs.map(commentHtml).join('') : `<div class="muted md-body">${fmtComment(n.snippet)}</div>`}
+      <div class="cbox" data-comment-box="${t.id}" style="margin-top:10px">
+        ${mdToolbar('inbox-reply', 'inbox:' + t.id)}
+        ${
+          cmtPrev
+            ? `<div class="md-body md-preview-box">${(S.ui.drafts[t.id] || '').trim() ? fmtComment(S.ui.drafts[t.id]) : '<span class="faint">Nothing to preview yet…</span>'}</div>`
+            : `<textarea id="inbox-reply" data-in="draft" data-id="${t.id}" data-key-mod-enter="postComment" placeholder="Reply in Markdown (**bold**, \`code\`)… use @ to mention or ${MOD}+V to paste files" aria-label="Reply">${esc(S.ui.drafts[t.id] || '')}</textarea>`
+        }
       ${
         (S.ui.commentFiles?.[t.id] || []).length
           ? `<div class="row" style="flex-wrap:wrap;gap:6px;padding:6px 10px;border-top:1px dashed var(--border);background:var(--surface-2)">${(S.ui.commentFiles[t.id] || [])

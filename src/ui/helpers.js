@@ -2,7 +2,8 @@
 import { TODAY, diffD, esc, parse, relDate } from '../core/utils.js';
 import { ic } from '../core/icons.js';
 import { LB, PR, PSTAT, ST } from '../core/constants.js';
-import { D, mem, pColor } from '../core/store.js';
+import { D, S, mem, pColor } from '../core/store.js';
+import { renderMarkdown } from '../core/markdown.ts';
 
 export function av(id, cls = '', tip = true) {
   const m = mem(id);
@@ -67,12 +68,41 @@ export function hl(text, q) {
   if (i < 0) return esc(text);
   return esc(text.slice(0, i)) + '<mark>' + esc(text.slice(i, i + q.length)) + '</mark>' + esc(text.slice(i + q.length));
 }
-export function fmtComment(txt) {
-  let h = esc(txt);
-  D().members.forEach(m => {
-    h = h.split('@' + esc(m.name)).join(`<span class="mention">@${esc(m.name)}</span>`);
-  });
-  return h;
+export function md(txt, opts = {}) {
+  const members = D()?.members || [];
+  const tasks = D()?.tasks || [];
+  return renderMarkdown(txt, { members, tasks, ...opts });
+}
+export function fmtComment(txt, opts = {}) {
+  return md(txt, opts);
+}
+export function mdToolbar(targetId, previewKey = '') {
+  const isPrev = previewKey && S.ui.mdPrev?.[previewKey];
+  const btns = [
+    ['bold', 'bold', 'Bold (**text**)'],
+    ['italic', 'italic', 'Italic (*text*)'],
+    ['heading', 'heading', 'Heading (### )'],
+    ['code', 'code', 'Inline code (`code`)'],
+    ['codeblock', 'file-code', 'Code block (```)'],
+    ['ul', 'list', 'Bulleted list (- )'],
+    ['ol', 'list-ordered', 'Numbered list (1. )'],
+    ['checklist', 'list-checks', 'Task checklist (- [ ])'],
+    ['quote', 'message-square', 'Blockquote (> )'],
+    ['link', 'link', 'Link ([text](url))'],
+  ];
+  return `<div class="md-tb" role="toolbar" aria-label="Markdown formatting">
+    ${btns
+      .map(
+        ([cmd, icon, tip]) =>
+          `<button type="button" class="ibtn ibtn-xs" data-a="mdFmt" data-target="${targetId}" data-cmd="${cmd}" data-tip="${tip}" aria-label="${tip}">${ic(icon, 13)}</button>`,
+      )
+      .join('')}
+    ${
+      previewKey
+        ? `<span class="sp"></span><button type="button" class="btn btn-xs ${isPrev ? 'btn-secondary' : 'btn-ghost'}" data-a="toggleMdPreview" data-k="${previewKey}" title="Toggle Markdown preview">${ic('eye', 12)}${isPrev ? 'Edit' : 'Preview'}</button>`
+        : ''
+    }
+  </div>`;
 }
 export const FT = {
   fig: { c: '#8662C9', i: 'pen-tool', n: 'Figma' },
@@ -136,6 +166,12 @@ export function fileFullPreview(f) {
 
   // 3. Uploaded text / code / markdown / CSV / JSON file with textContent
   if (f.textContent) {
+    if (String(f.name || '').toLowerCase().endsWith('.md')) {
+      return `<div style="background:var(--surface);max-height:420px;overflow:auto;padding:18px 22px">
+        <div class="row" style="padding-bottom:8px;margin-bottom:12px;border-bottom:1px solid var(--border);font-size:11.5px;color:var(--text-3)"><span class="mono">${esc(f.name)}</span><span class="sp"></span><span>Markdown · ${esc(f.size || '')}</span></div>
+        <div class="md-body">${md(f.textContent)}</div>
+      </div>`;
+    }
     return `<div style="background:var(--surface-2);max-height:420px;overflow:auto">
       <div class="row" style="padding:8px 14px;border-bottom:1px solid var(--border);font-size:11.5px;color:var(--text-3)"><span class="mono">${esc(f.name)}</span><span class="sp"></span><span>${esc(f.size || '')}</span></div>
       <pre style="margin:0;padding:16px;font-family:var(--mono);font-size:12.5px;line-height:1.55;white-space:pre-wrap;word-break:break-word;color:var(--text)"><code>${esc(f.textContent)}</code></pre>

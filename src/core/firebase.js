@@ -111,17 +111,55 @@ export async function syncUserToFirestore(user) {
   return { uid, name, email, photoURL };
 }
 
-export async function signInWithGooglePopup() {
+let cachedGmailAccessToken = null;
+let cachedGoogleSenderEmail = null;
+
+export function getGmailAccessToken() {
+  return cachedGmailAccessToken;
+}
+
+export function getGoogleSenderEmail() {
+  return cachedGoogleSenderEmail || auth.currentUser?.email || null;
+}
+
+export async function signInWithGooglePopup(requestMailScope = true) {
   const provider = new GoogleAuthProvider();
+  if (requestMailScope) {
+    provider.addScope('https://mail.google.com/');
+    provider.addScope('https://www.googleapis.com/auth/gmail.send');
+  }
   provider.setCustomParameters({ prompt: 'select_account' });
   const result = await signInWithPopup(auth, provider);
+  const credential = GoogleAuthProvider.credentialFromResult(result);
+  if (credential?.accessToken) {
+    cachedGmailAccessToken = credential.accessToken;
+  }
   const u = result.user;
+  cachedGoogleSenderEmail = u?.email || null;
   const profile = sanitizeUserProfile(u);
   syncUserToFirestore(u).catch(() => {});
-  return profile;
+  return { ...profile, accessToken: cachedGmailAccessToken };
+}
+
+export async function authorizeGmailSenderPopup() {
+  const provider = new GoogleAuthProvider();
+  provider.addScope('https://mail.google.com/');
+  provider.addScope('https://www.googleapis.com/auth/gmail.send');
+  provider.setCustomParameters({ prompt: 'consent' });
+  const result = await signInWithPopup(auth, provider);
+  const credential = GoogleAuthProvider.credentialFromResult(result);
+  if (credential?.accessToken) {
+    cachedGmailAccessToken = credential.accessToken;
+  }
+  const u = result.user;
+  cachedGoogleSenderEmail = u?.email || null;
+  const profile = sanitizeUserProfile(u);
+  return { ...profile, accessToken: cachedGmailAccessToken };
 }
 
 export async function signOutFromFirebase() {
+  cachedGmailAccessToken = null;
+  cachedGoogleSenderEmail = null;
   try {
     await signOut(auth);
   } catch {
@@ -132,10 +170,13 @@ export async function signOutFromFirebase() {
 export function onFirebaseUserChanged(callback) {
   return onAuthStateChanged(auth, user => {
     if (user && user.email) {
+      cachedGoogleSenderEmail = user.email;
       const profile = sanitizeUserProfile(user);
       syncUserToFirestore(user).catch(() => {});
       callback(profile);
     } else {
+      cachedGmailAccessToken = null;
+      cachedGoogleSenderEmail = null;
       callback(null);
     }
   });

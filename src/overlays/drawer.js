@@ -4,7 +4,8 @@
 import { MOD, TODAY, ago, diffD, esc, fmtDate, parse, relDate } from '../core/utils.js';
 import { ic } from '../core/icons.js';
 import { D, S, commentsOf, isOver, mem, pColor, proj, task } from '../core/store.js';
-import { FT, av, filePrev, fileType, fmtComment, lbl, progBar } from '../ui/helpers.js';
+import { FT, av, filePrev, fileType, fmtComment, lbl, md, mdToolbar, progBar } from '../ui/helpers.js';
+import { normalizeHtmlToMarkdown } from '../core/markdown.ts';
 import { fxc } from '../shell/render.js';
 import { cellAssignee, cellDue, cellPrio, cellProject, cellStatus } from '../components/task-list.js';
 import { modalHtml } from './modals.js';
@@ -45,6 +46,8 @@ export function drawerHtml(t) {
           .slice(0, 5)
       : [];
   const sub = u.subOpen && u.subOpen.tid === t.id ? t.subtasks.find(s => s.id === u.subOpen.sid) : null;
+  const isEditingDesc = u.descEdit === t.id;
+  const cmtPrev = u.mdPrev?.['cmt:' + t.id];
   return `<aside class="drawer ${u.drawerFull ? 'full' : ''} ${u.fx.drawer ? 'enter' : ''} ${u.fx.tabs ? 'fx-tabs' : ''}" role="dialog" aria-modal="${u.drawerFull}" aria-labelledby="d-h" tabindex="-1">
     <h2 class="sr" id="d-h">${sub ? 'Subtask: ' + esc(sub.title) : 'Task: ' + esc(t.title)}</h2>
     <div class="drawer-h">
@@ -76,19 +79,18 @@ export function drawerHtml(t) {
         ${prop('git-branch', 'Blocked by', `<button class="pillbtn ${t.deps.length ? '' : 'empty'}" data-a="pop" data-pop="deps" data-id="${t.id}" style="height:auto;min-height:26px;flex-wrap:wrap">${t.deps.length ? t.deps.map(d => (task(d) ? `<span class="depchip mono" style="font-size:11px;padding:1px 5px;border-radius:4px;background:var(--surface-3)">${task(d).key}</span><span class="trunc" style="max-width:160px">${esc(task(d).title)}</span>` : '')).join('') : ic('git-branch', 13) + 'None'}</button>`)}
       </dl>
 
-      <div class="dsec"><div class="dsec-h"><h3 id="d-desc-l">Description</h3><div class="rte-tb" role="toolbar" aria-label="Formatting" aria-controls="d-desc">
-          ${[
-            ['bold', 'bold', 'Bold'],
-            ['italic', 'italic', 'Italic'],
-            ['insertUnorderedList', 'list', 'Bulleted list'],
-            ['insertOrderedList', 'list-ordered', 'Numbered list'],
-            ['formatBlock:h4', 'heading', 'Heading'],
-            ['createLink', 'link', 'Link'],
-          ]
-            .map(([c, i, n]) => `<button class="ibtn ibtn-xs" data-cmd="${c}" data-tip="${n}" aria-label="${n}">${ic(i, 13)}</button>`)
-            .join('')}
-        </div></div>
-        <div class="rte"><div class="rte-body" id="d-desc" contenteditable="true" data-rte="${t.id}" data-ph="Add a description…" role="textbox" aria-multiline="true" aria-labelledby="d-desc-l">${t.desc}</div></div>
+      <div class="dsec"><div class="dsec-h"><h3 id="d-desc-l">Description</h3><span class="faint" style="font-size:11px">Markdown</span><span class="sp"></span>
+        ${
+          isEditingDesc
+            ? `<button type="button" class="btn btn-xs btn-primary" data-a="finishTaskDesc" data-id="${t.id}">${ic('check', 12)}Done</button>`
+            : `<button type="button" class="btn btn-xs btn-ghost" data-a="editTaskDesc" data-id="${t.id}">${ic('pencil', 12)}Edit</button>`
+        }
+      </div>
+        ${
+          isEditingDesc
+            ? `<div class="cbox" style="padding:6px 10px">${mdToolbar('d-desc')}<textarea class="textarea" id="d-desc" data-in="taskDesc" data-id="${t.id}" rows="4" data-autosize placeholder="Add a description… Supports Markdown (**bold**, *italic*, \`code\`, - [ ] checklists, tables)" aria-labelledby="d-desc-l" style="border:0;padding:4px 0;background:transparent">${esc(normalizeHtmlToMarkdown(t.desc || ''))}</textarea></div>`
+            : `<div class="rte"><div class="rte-body md-body" id="d-desc" data-a="editTaskDesc" data-id="${t.id}" role="button" tabindex="0" aria-labelledby="d-desc-l" style="cursor:text">${t.desc && t.desc.trim() ? md(t.desc) : '<span class="faint">Add a description… (click to write with Markdown)</span>'}</div></div>`
+        }
       </div>
 
       <div class="dsec"><div class="dsec-h"><h3>Subtasks</h3><span class="cnt num">${sd}/${t.subtasks.length}</span>${t.subtasks.length ? `<span style="width:90px;display:flex">${progBar(Math.round((sd / t.subtasks.length) * 100), sd === t.subtasks.length ? 'green' : '')}</span>` : ''}</div>
@@ -116,7 +118,13 @@ export function drawerHtml(t) {
             ? `
           ${cs.length ? cs.map(commentHtml).join('') : `<p class="faint" style="font-size:13px;margin:10px 0">No comments yet. Start the conversation.</p>`}
           <div class="row" style="align-items:flex-start;gap:10px;margin-top:8px">${av(D().me, 'md', false)}<div class="grow" style="position:relative">
-            <div class="cbox" data-comment-box="${t.id}"><textarea id="d-cmt" data-in="draft" data-id="${t.id}" data-key-mod-enter="postComment" placeholder="Leave a comment… type @ to mention or paste files (${MOD}+V)" aria-label="Comment" rows="2" data-autosize>${esc(u.drafts[t.id] || '')}</textarea>
+            <div class="cbox" data-comment-box="${t.id}">
+              ${mdToolbar('d-cmt', 'cmt:' + t.id)}
+              ${
+                cmtPrev
+                  ? `<div class="md-body md-preview-box">${(u.drafts[t.id] || '').trim() ? fmtComment(u.drafts[t.id]) : '<span class="faint">Nothing to preview yet…</span>'}</div>`
+                  : `<textarea id="d-cmt" data-in="draft" data-id="${t.id}" data-key-mod-enter="postComment" placeholder="Leave a comment in Markdown (**bold**, \`code\`, - list)… @ to mention or ${MOD}+V to paste files" aria-label="Comment" rows="2" data-autosize>${esc(u.drafts[t.id] || '')}</textarea>`
+              }
             ${
               (u.commentFiles?.[t.id] || []).length
                 ? `<div class="row" style="flex-wrap:wrap;gap:6px;padding:6px 10px;border-top:1px dashed var(--border);background:var(--surface-2)">${(u.commentFiles[t.id] || [])
@@ -147,7 +155,7 @@ export function commentHtml(c) {
   const m = mem(c.by);
   const mine = c.by === D().me;
   const atts = Array.isArray(c.attachments) ? c.attachments : [];
-  return `<div class="cmt">${av(c.by, 'md', false)}<div class="body"><div class="who"><b>${esc(m?.name)}</b><time>${ago(c.at)}</time>${mine ? `<span class="sp"></span><button class="ibtn ibtn-xs" data-a="delComment" data-id="${c.id}" aria-label="Delete comment" data-tip="Delete">${ic('trash-2', 12)}</button>` : ''}</div>${c.text ? `<div class="txt">${fmtComment(c.text)}</div>` : ''}
+  return `<div class="cmt">${av(c.by, 'md', false)}<div class="body"><div class="who"><b>${esc(m?.name)}</b><time>${ago(c.at)}</time>${mine ? `<span class="sp"></span><button class="ibtn ibtn-xs" data-a="delComment" data-id="${c.id}" aria-label="Delete comment" data-tip="Delete">${ic('trash-2', 12)}</button>` : ''}</div>${c.text ? `<div class="txt md-body">${fmtComment(c.text)}</div>` : ''}
     ${
       atts.length
         ? `<div class="cmt-atts" style="display:flex;flex-wrap:wrap;gap:8px;margin-top:8px">${atts

@@ -48,48 +48,147 @@ const DB_FILE = path.join(DATA_DIR, 'snapsec-db.json');
 
 let cachedEtherealAccount: nodemailer.TestAccount | null = null;
 
-async function dispatchOutboxEmail(store: PersistedStore, outboxItem: any) {
+function buildRawMimeEmail(outboxItem: any, fromEmail: string): string {
+  const fromName = String(outboxItem.fromName || 'Snapsec Workspace').replace(/["\r\n]/g, '');
+  const subject = `=?UTF-8?B?${Buffer.from(String(outboxItem.subject || 'Snapsec Invitation'), 'utf8').toString('base64')}?=`;
+  const lines = [
+    `From: "${fromName}" <${fromEmail}>`,
+    `To: ${outboxItem.to}`,
+    `Subject: ${subject}`,
+    'MIME-Version: 1.0',
+    'Content-Type: text/html; charset=UTF-8',
+    'Content-Transfer-Encoding: base64',
+    '',
+    Buffer.from(String(outboxItem.html || outboxItem.text || ''), 'utf8').toString('base64'),
+  ];
+  return Buffer.from(lines.join('\r\n'), 'utf8')
+    .toString('base64')
+    .replace(/\+/g, '-')
+    .replace(/\//g, '_')
+    .replace(/=+$/, '');
+}
+
+async function dispatchOutboxEmail(
+  store: PersistedStore,
+  outboxItem: any,
+  opts: { googleAccessToken?: string; senderEmail?: string } = {},
+) {
   if (!outboxItem) return outboxItem;
   if (process.env.NODE_ENV === 'test') {
     outboxItem.status = 'sent';
     outboxItem.transport = 'test';
+    outboxItem.deliveredToInbox = true;
     return outboxItem;
   }
-  try {
-    const customSmtp = store.data?.smtpConfig;
-    const host = customSmtp?.host || process.env.SMTP_HOST;
-    const port = Number(customSmtp?.port || process.env.SMTP_PORT || 587);
-    const user = customSmtp?.user || process.env.SMTP_USER;
-    const pass = customSmtp?.pass || process.env.SMTP_PASS;
 
-    let transporter: nodemailer.Transporter;
-    let isEthereal = false;
+  const googleToken = opts.googleAccessToken || '';
+  const senderEmail = opts.senderEmail || outboxItem.from || 'mohammadowais616@gmail.com';
 
-    if (host && user && pass) {
-      transporter = nodemailer.createTransport({
+  // 1. Try Google OAuth (Gmail REST API first, then smtp.gmail.com:465 XOAUTH2)
+  if (googleToken) {
+    try {
+      const raw = buildRawMimeEmail(outboxItem, senderEmail);
+      const gmailRes = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages/send', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${googleToken}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ raw }),
+      });
+      if (gmailRes.ok) {
+        const gmailData: any = await gmailRes.json();
+        outboxItem.messageId = gmailData.id || uid('gmail');
+        outboxItem.status = 'sent';
+        outboxItem.transport = 'gmail-api';
+        outboxItem.deliveredToInbox = true;
+        outboxItem.transportError = undefined;
+        return outboxItem;
+      }
+    } catch {
+      /* fallback to smtp.gmail.com XOAUTH2 below */
+    }
+
+    try {
+      const oauthTransporter = nodemailer.createTransport({
+        host: 'smtp.gmail.com',
+        port: 465,
+        secure: true,
+        auth: {
+          type: 'OAuth2',
+          user: senderEmail,
+          accessToken: googleToken,
+        },
+      });
+      const info = await oauthTransporter.sendMail({
+        from: `"${outboxItem.fromName || 'Snapsec Workspace'}" <${senderEmail}>`,
+        to: outboxItem.to,
+        subject: outboxItem.subject,
+        text: outboxItem.text,
+        html: outboxItem.html,
+      });
+      outboxItem.messageId = info.messageId;
+      outboxItem.status = 'sent';
+      outboxItem.transport = 'gmail-smtp-oauth';
+      outboxItem.deliveredToInbox = true;
+      outboxItem.transportError = undefined;
+      return outboxItem;
+    } catch (oauthErr: any) {
+      outboxItem.oauthError = oauthErr?.message || 'Google OAuth SMTP failed';
+    }
+  }
+
+  // 2. Try Custom SMTP / Gmail App Password (smtp.gmail.com or custom SMTP server)
+  const customSmtp = store.data?.smtpConfig;
+  const host = (customSmtp?.host || process.env.SMTP_HOST || '').trim();
+  const port = Number(customSmtp?.port || process.env.SMTP_PORT || 465);
+  const user = (customSmtp?.user || process.env.SMTP_USER || '').trim();
+  const rawPass = (customSmtp?.pass || process.env.SMTP_PASS || '').trim();
+  const pass = host.includes('gmail.com') ? rawPass.replace(/\s+/g, '') : rawPass;
+
+  if (host && user && pass) {
+    try {
+      const smtpTransporter = nodemailer.createTransport({
         host,
         port,
         secure: port === 465,
         auth: { user, pass },
       });
-    } else {
-      isEthereal = true;
-      if (!cachedEtherealAccount) {
-        cachedEtherealAccount = await nodemailer.createTestAccount();
-      }
-      transporter = nodemailer.createTransport({
-        host: cachedEtherealAccount.smtp.host,
-        port: cachedEtherealAccount.smtp.port,
-        secure: cachedEtherealAccount.smtp.secure,
-        auth: {
-          user: cachedEtherealAccount.user,
-          pass: cachedEtherealAccount.pass,
-        },
+      const info = await smtpTransporter.sendMail({
+        from: `"${outboxItem.fromName || 'Snapsec Workspace'}" <${customSmtp?.from || user}>`,
+        to: outboxItem.to,
+        subject: outboxItem.subject,
+        text: outboxItem.text,
+        html: outboxItem.html,
       });
+      outboxItem.messageId = info.messageId;
+      outboxItem.status = 'sent';
+      outboxItem.transport = 'custom-smtp';
+      outboxItem.deliveredToInbox = true;
+      outboxItem.transportError = undefined;
+      return outboxItem;
+    } catch (smtpErr: any) {
+      outboxItem.transportError = smtpErr?.message || 'Custom SMTP authentication failed';
     }
+  }
+
+  // 3. Fallback: Ethereal SMTP sandbox (generates live webmail preview URL)
+  try {
+    if (!cachedEtherealAccount) {
+      cachedEtherealAccount = await nodemailer.createTestAccount();
+    }
+    const transporter = nodemailer.createTransport({
+      host: cachedEtherealAccount.smtp.host,
+      port: cachedEtherealAccount.smtp.port,
+      secure: cachedEtherealAccount.smtp.secure,
+      auth: {
+        user: cachedEtherealAccount.user,
+        pass: cachedEtherealAccount.pass,
+      },
+    });
 
     const info = await transporter.sendMail({
-      from: `"${outboxItem.fromName || 'Snapsec Workspace'}" <${user || outboxItem.from || 'noreply@snapsec.co'}>`,
+      from: `"${outboxItem.fromName || 'Snapsec Workspace'}" <${outboxItem.from || 'noreply@snapsec.co'}>`,
       to: outboxItem.to,
       subject: outboxItem.subject,
       text: outboxItem.text,
@@ -98,13 +197,13 @@ async function dispatchOutboxEmail(store: PersistedStore, outboxItem: any) {
 
     outboxItem.messageId = info.messageId;
     outboxItem.status = 'sent';
-    outboxItem.transport = isEthereal ? 'ethereal-smtp' : 'custom-smtp';
-    if (isEthereal) {
-      const url = nodemailer.getTestMessageUrl(info);
-      if (url) outboxItem.previewUrl = String(url);
-    }
+    outboxItem.transport = 'ethereal-smtp';
+    outboxItem.deliveredToInbox = false;
+    const url = nodemailer.getTestMessageUrl(info);
+    if (url) outboxItem.previewUrl = String(url);
   } catch (err: any) {
     outboxItem.status = 'ready';
+    outboxItem.deliveredToInbox = false;
     outboxItem.transportError = err?.message || 'SMTP relay unavailable';
   }
   return outboxItem;
@@ -574,11 +673,15 @@ export function createApp() {
         origin,
         req.body?.projectName || '',
       );
+      const googleAccessToken =
+        req.body?.googleAccessToken ||
+        (req.headers.authorization?.startsWith('Bearer ') ? req.headers.authorization.slice(7) : '');
+      const senderEmail = req.body?.senderEmail || '';
       const sentEmails: any[] = [];
       for (const m of invited) {
         const msg = (db.data.outbox || []).find((o: any) => o.id === m.lastInviteId);
         if (msg) {
-          await dispatchOutboxEmail(db, msg);
+          await dispatchOutboxEmail(db, msg, { googleAccessToken, senderEmail });
           sentEmails.push(msg);
         }
       }
@@ -601,8 +704,12 @@ export function createApp() {
       return;
     }
     const origin = req.body?.baseUrl || `${req.protocol}://${req.get('host')}`;
+    const googleAccessToken =
+      req.body?.googleAccessToken ||
+      (req.headers.authorization?.startsWith('Bearer ') ? req.headers.authorization.slice(7) : '');
+    const senderEmail = req.body?.senderEmail || '';
     const msg = buildInvitationEmail(db.data, m, origin, req.body?.projectName || '');
-    await dispatchOutboxEmail(db, msg);
+    await dispatchOutboxEmail(db, msg, { googleAccessToken, senderEmail });
     saveDatabase(db);
     res.json({ ok: true, member: m, email: msg, outbox: db.data.outbox || [], updatedAt: db.updatedAt });
   });
@@ -624,17 +731,45 @@ export function createApp() {
     });
   });
 
-  app.post('/api/settings/smtp', (req, res) => {
+  app.post('/api/settings/smtp', async (req, res) => {
     const { host, port, user, pass, from } = req.body || {};
+    const cleanHost = String(host || 'smtp.gmail.com').trim();
+    const cleanPort = Number(port || 465);
+    const cleanUser = String(user || '').trim();
+    const cleanPass = cleanHost.includes('gmail.com')
+      ? String(pass || '').replace(/\s+/g, '')
+      : String(pass || '').trim();
     db.data.smtpConfig = {
-      host: String(host || '').trim(),
-      port: Number(port || 587),
-      user: String(user || '').trim(),
-      pass: String(pass || '').trim(),
-      from: String(from || '').trim(),
+      host: cleanHost,
+      port: cleanPort,
+      user: cleanUser,
+      pass: cleanPass,
+      from: String(from || cleanUser).trim(),
     };
     saveDatabase(db);
-    res.json({ ok: true, smtpConfigured: !!db.data.smtpConfig.host });
+
+    let verified = false;
+    let verifyError = '';
+    if (cleanHost && cleanUser && cleanPass && process.env.NODE_ENV !== 'test') {
+      try {
+        const transporter = nodemailer.createTransport({
+          host: cleanHost,
+          port: cleanPort,
+          secure: cleanPort === 465,
+          auth: { user: cleanUser, pass: cleanPass },
+        });
+        await transporter.verify();
+        verified = true;
+      } catch (e: any) {
+        verifyError = e?.message || 'Could not verify SMTP credentials';
+      }
+    }
+    res.json({
+      ok: true,
+      smtpConfigured: !!(cleanHost && cleanUser && cleanPass),
+      verified,
+      verifyError,
+    });
   });
 
   app.patch('/api/members/:id', (req, res) => {

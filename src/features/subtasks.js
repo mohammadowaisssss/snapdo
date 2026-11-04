@@ -1,11 +1,13 @@
 /* ---------- subtask detail view (inside the task drawer) ---------- */
 import { esc, relDate } from '../core/utils.js';
 import { ic } from '../core/icons.js';
-import { mem } from '../core/store.js';
-import { av } from '../ui/helpers.js';
+import { S, mem } from '../core/store.js';
+import { av, md, mdToolbar } from '../ui/helpers.js';
 
 export function subtaskHtml(t, s) {
   const i = t.subtasks.indexOf(s);
+  const prevKey = 'sub:' + s.id;
+  const isPrev = S.ui.mdPrev?.[prevKey];
   return `<div class="subview">
     <button class="pillbtn" data-a="closeSub" style="margin:-4px 0 14px -7px;font-size:12.5px;color:var(--text-2)">${ic('arrow-left', 14)}<span class="trunc" style="max-width:420px">${esc(t.title)}</span></button>
     <div class="row" style="gap:10px;align-items:flex-start">
@@ -18,8 +20,16 @@ export function subtaskHtml(t, s) {
       <dt>${ic('calendar', 14)}Due date</dt><dd><button class="pillbtn ${s.due ? '' : 'empty'}" data-a="pop" data-pop="date" data-field="subdue" data-id="${t.id}" data-i="${i}">${ic('calendar', 13)}<span class="num">${s.due ? relDate(s.due) : 'Set date'}</span></button></dd>
       <dt>${ic('folder', 14)}Parent</dt><dd><button class="pillbtn" data-a="closeSub"><span class="mono faint" style="font-size:11px">${t.key}</span>${esc(t.title)}</button></dd>
     </dl>
-    <div class="dsec"><div class="dsec-h"><h3 id="s-note-l">Notes</h3></div>
-      <textarea class="textarea" id="s-note" data-in="subNote" data-id="${t.id}" data-sid="${s.id}" rows="4" placeholder="Add details, links, or acceptance criteria…" aria-labelledby="s-note-l">${esc(s.note || '')}</textarea></div>
+    <div class="dsec"><div class="dsec-h"><h3 id="s-note-l">Notes</h3><span class="faint" style="font-size:11px">Markdown</span></div>
+      <div class="cbox" style="padding:6px 10px">
+        ${mdToolbar('s-note', prevKey)}
+        ${
+          isPrev
+            ? `<div class="md-body md-preview-box">${(s.note || '').trim() ? md(s.note) : '<span class="faint">Nothing to preview yet…</span>'}</div>`
+            : `<textarea class="textarea" id="s-note" data-in="subNote" data-id="${t.id}" data-sid="${s.id}" rows="4" placeholder="Add details, links, or acceptance criteria in Markdown…" aria-labelledby="s-note-l" style="border:0;padding:4px 0;background:transparent">${esc(s.note || '')}</textarea>`
+        }
+      </div>
+    </div>
     <div class="dsec row" style="gap:6px;flex-wrap:wrap">
       <button class="btn btn-secondary btn-sm" data-a="promoteSub" data-id="${t.id}" data-sid="${s.id}">${ic('arrow-up-right', 13)}Convert to task</button>
       <span class="sp"></span>

@@ -3,7 +3,8 @@ import { $$, MOD, ago, esc, fmtDate } from '../core/utils.js';
 import { ic } from '../core/icons.js';
 import { PCOLORS, PICONS } from '../core/constants.js';
 import { D, S, mem, pColor, proj, task, teamsList } from '../core/store.js';
-import { FT, av, fileFullPreview, filePrev, lbl, prPill, stPill } from '../ui/helpers.js';
+import { FT, av, fileFullPreview, filePrev, lbl, md, mdToolbar, prPill, stPill } from '../ui/helpers.js';
+import { getGmailAccessToken, getGoogleSenderEmail } from '../core/firebase.js';
 import { focusKey, render } from '../shell/render.js';
 import { teamModal } from '../features/teams.js';
 
@@ -68,10 +69,21 @@ export function taskModal(m, H) {
   const f = S.ui.form;
   const p = proj(f.project);
   const err = S.ui.errors.title;
+  const descPrev = !!(S.ui.mdPrev && S.ui.mdPrev['form:desc']);
   return `${H(m.edit ? 'Edit task' : 'New task', m.edit ? `<span class="mono">${task(m.edit)?.key}</span>` : '')}
   <form class="modal-b" data-submit="submitTask" style="gap:12px">
     <div class="field"><label class="sr" for="f-title">Task name</label><input class="input input-lg ${err ? 'is-error' : ''}" id="f-title" data-in="form" data-f="title" value="${esc(f.title)}" placeholder="Task name" autofocus aria-invalid="${!!err}" aria-describedby="f-title-err" style="font-size:15px;font-weight:500">${err ? `<span class="err" id="f-title-err">${ic('circle-alert', 12)}${err}</span>` : ''}</div>
-    <div class="field"><label class="sr" for="f-desc">Description</label><textarea class="textarea" id="f-desc" data-in="form" data-f="desc" placeholder="Add a description… (optional)" rows="3">${esc(f.desc)}</textarea></div>
+    <div class="field">
+      <div class="row" style="justify-content:space-between;margin-bottom:4px">
+        <label class="label" for="f-desc" style="margin:0">Description <span class="faint" style="font-weight:400">(Markdown supported)</span></label>
+        ${mdToolbar('f-desc', 'form:desc')}
+      </div>
+      ${
+        descPrev
+          ? `<div class="md-preview-box md-body" style="min-height:76px">${f.desc?.trim() ? md(f.desc) : '<span class="faint">Nothing to preview yet…</span>'}</div>`
+          : `<textarea class="textarea" id="f-desc" data-in="form" data-f="desc" placeholder="Add a description with **Markdown**, lists, code, or tables… (optional)" rows="3">${esc(f.desc)}</textarea>`
+      }
+    </div>
     <div class="row" style="flex-wrap:wrap;gap:6px">
       ${formChip('project', `<span class="pdot" style="--c:${pColor(p)}"></span>${esc(p?.name || 'Project')}`, 'Project')}
       ${formChip('status', stPill(f.status), 'Status')}
@@ -141,13 +153,24 @@ export const TEMPLATES = [
 export function projectModal(m, H) {
   const f = S.ui.pform;
   const err = S.ui.errors.pname;
+  const pDescPrev = !!(S.ui.mdPrev && S.ui.mdPrev['pform:desc']);
   return `${H(m.edit ? 'Project settings' : 'New project', m.edit ? '' : 'Projects hold tasks, files, and conversations for one body of work.')}
   <form class="modal-b" data-submit="submitProject">
     <div class="row" style="gap:10px;align-items:flex-start">
       <button type="button" class="picon lg" style="--c:${PCOLORS[f.color]};cursor:default;flex-shrink:0;margin-top:22px" aria-hidden="true" tabindex="-1">${ic(f.icon, 18)}</button>
       <div class="field grow"><label class="label" for="p-name">Project name</label><input class="input ${err ? 'is-error' : ''}" id="p-name" data-in="pform" data-f="name" value="${esc(f.name)}" placeholder="e.g. Website Redesign" autofocus aria-invalid="${!!err}">${err ? `<span class="err">${ic('circle-alert', 12)}${err}</span>` : ''}</div>
     </div>
-    <div class="field"><label class="label" for="p-desc">Description</label><textarea class="textarea" id="p-desc" data-in="pform" data-f="desc" rows="2" placeholder="What is this project about?">${esc(f.desc)}</textarea></div>
+    <div class="field">
+      <div class="row" style="justify-content:space-between;margin-bottom:4px">
+        <label class="label" for="p-desc" style="margin:0">Description <span class="faint" style="font-weight:400">(Markdown supported)</span></label>
+        ${mdToolbar('p-desc', 'pform:desc')}
+      </div>
+      ${
+        pDescPrev
+          ? `<div class="md-preview-box md-body" style="min-height:60px">${f.desc?.trim() ? md(f.desc) : '<span class="faint">Nothing to preview yet…</span>'}</div>`
+          : `<textarea class="textarea" id="p-desc" data-in="pform" data-f="desc" rows="2" placeholder="What is this project about? (Supports Markdown)">${esc(f.desc)}</textarea>`
+      }
+    </div>
     <div class="row" style="gap:16px;align-items:flex-start;flex-wrap:wrap">
       <div class="field" style="flex:1;min-width:220px"><span class="label">Icon</span><div class="iconpick" role="radiogroup" aria-label="Icon">${PICONS.map(i => `<button type="button" role="radio" aria-checked="${f.icon === i}" class="${f.icon === i ? 'on' : ''}" data-a="pformSet" data-f="icon" data-v="${i}" aria-label="${i}">${ic(i, 15)}</button>`).join('')}</div></div>
       <div class="field"><span class="label">Color</span><div class="swatches" role="radiogroup" aria-label="Color" style="max-width:140px">${Object.entries(
@@ -215,11 +238,51 @@ export function shareModal(m, H) {
   </div>
   <div class="modal-f"><button class="btn btn-secondary" data-a="copyLink" data-pid="${p.id}">${ic('link', 14)}Copy link</button><span class="sp"></span><button class="btn btn-primary" data-a="closeModal">Done</button></div>`;
 }
+export function smtpConfigFormHtml() {
+  const cfg = D().smtpConfig || {};
+  const err = S.ui.errors?.smtp;
+  return `<div class="panel" style="padding:12px;background:var(--surface-2);border:1px solid var(--border-strong);border-radius:var(--r);display:flex;flex-direction:column;gap:10px">
+    <div class="row" style="justify-content:space-between">
+      <div style="font-size:12.5px;font-weight:600;display:flex;align-items:center;gap:6px">${ic('mail', 14)}Direct Gmail / SMTP Delivery Configuration</div>
+      <button type="button" class="ibtn ibtn-xs" data-a="toggleSmtpForm" aria-label="Close SMTP form">${ic('x', 13)}</button>
+    </div>
+    <div class="faint" style="font-size:11.5px;line-height:1.45">Enter a Gmail address + 16-character <a href="https://myaccount.google.com/apppasswords" target="_blank" rel="noopener noreferrer" class="link">Google App Password</a> (or custom SMTP credentials) to deliver invitation emails directly into external Gmail inboxes.</div>
+    <div class="row" style="gap:8px;flex-wrap:wrap">
+      <div class="field" style="flex:1;min-width:170px"><label class="label" for="smtp-user">Gmail / SMTP Username</label><input class="input" id="smtp-user" placeholder="you@gmail.com" value="${esc(cfg.user || getGoogleSenderEmail() || D().members.find(x => x.id === D().me)?.email || '')}"></div>
+      <div class="field" style="flex:1;min-width:170px"><label class="label" for="smtp-pass">Gmail App Password / SMTP Password</label><input class="input" id="smtp-pass" type="password" placeholder="xxxx xxxx xxxx xxxx" value="${esc(cfg.pass || '')}"></div>
+    </div>
+    <div class="row" style="gap:8px;flex-wrap:wrap">
+      <div class="field" style="flex:2;min-width:150px"><label class="label" for="smtp-host">SMTP Host</label><input class="input" id="smtp-host" placeholder="smtp.gmail.com" value="${esc(cfg.host || 'smtp.gmail.com')}"></div>
+      <div class="field" style="flex:1;min-width:90px"><label class="label" for="smtp-port">Port</label><input class="input" id="smtp-port" type="number" placeholder="465" value="${esc(cfg.port || 465)}"></div>
+    </div>
+    ${err ? `<div class="err">${ic('circle-alert', 12)}${esc(err)}</div>` : ''}
+    <div class="row" style="justify-content:flex-end;gap:8px">
+      <button type="button" class="btn btn-xs btn-secondary" data-a="toggleSmtpForm">Cancel</button>
+      <button type="button" class="btn btn-xs btn-primary" data-a="saveSmtpConfig" id="smtp-save-btn">${ic('check', 12)}Verify &amp; Save SMTP</button>
+    </div>
+  </div>`;
+}
 export function inviteModal(m, H) {
   const err = S.ui.errors.invite;
   const outbox = (D().outbox || []).slice(0, 3);
+  const hasOAuth = !!getGmailAccessToken();
+  const smtpUser = D().smtpConfig?.user;
+  const senderEmail = getGoogleSenderEmail() || smtpUser || '';
   return `${H('Invite to ' + esc(D().ws.name), 'Invited people get an email with a direct link to join.')}
   <form class="modal-b" data-submit="submitInvite">
+    <div class="row" style="padding:8px 11px;border-radius:var(--r);border:1px solid ${hasOAuth || smtpUser ? 'color-mix(in srgb,var(--green) 38%,var(--border))' : 'var(--border)'};background:${hasOAuth || smtpUser ? 'color-mix(in srgb,var(--green) 8%,var(--surface))' : 'var(--surface-2)'};gap:8px;flex-wrap:wrap">
+      <span class="badge ${hasOAuth || smtpUser ? 'green' : 'amber'}"><span class="dot"></span>${hasOAuth ? 'Google Mail Connected' : smtpUser ? 'SMTP Active' : 'Direct Gmail Setup'}</span>
+      <span class="grow" style="font-size:12px;color:var(--text-2)">${
+        hasOAuth
+          ? `Sending directly from <b>${esc(senderEmail)}</b> via Gmail API`
+          : smtpUser
+            ? `Sending directly from <b>${esc(smtpUser)}</b> via ${esc(D().smtpConfig?.host || 'smtp.gmail.com')}`
+            : 'Connect Google Mail or SMTP so invites arrive directly in external Gmail inboxes.'
+      }</span>
+      <button type="button" class="btn btn-xs ${hasOAuth ? 'btn-secondary' : 'btn-primary'}" data-a="connectGmailOAuth">${ic('mail', 12)}${hasOAuth ? 'Reconnect Google' : 'Connect Google Mail'}</button>
+      <button type="button" class="btn btn-xs btn-secondary" data-a="toggleSmtpForm">${ic('settings', 12)}SMTP</button>
+    </div>
+    ${S.ui.showSmtpForm ? smtpConfigFormHtml() : ''}
     <div class="field"><label class="label" for="inv-emails">Email addresses</label><textarea class="textarea ${err ? 'is-error' : ''}" id="inv-emails" placeholder="name@company.com, another@company.com" rows="3" autofocus>${esc(S.ui.inviteDraft || '')}</textarea>${err ? `<span class="err">${ic('circle-alert', 12)}${err}</span>` : '<span class="hint">Separate multiple addresses with commas.</span>'}</div>
     <div class="row" style="gap:12px"><div class="field grow"><label class="label" for="inv-role">Role</label><select class="select" id="inv-role">${['Member', 'Admin', 'Guest'].map(r => `<option>${r}</option>`).join('')}</select></div>
     <div class="field grow"><label class="label" for="inv-team">Team</label><select class="select" id="inv-team">${teamsList()
@@ -231,7 +294,7 @@ export function inviteModal(m, H) {
         ? `<div style="border-top:1px solid var(--divider);padding-top:10px"><div class="eyebrow" style="margin-bottom:6px">Recent invitations sent</div><div class="col" style="gap:6px">${outbox
             .map(
               msg =>
-                `<div class="row" style="padding:6px 10px;border:1px solid var(--border);border-radius:7px;background:var(--surface-2);font-size:12px;gap:8px"><span class="badge green"><span class="dot"></span>Sent</span><span class="grow trunc"><b>${esc(msg.to)}</b> · ${esc(msg.role)}</span><button type="button" class="btn btn-xs btn-secondary" data-a="previewInviteEmail" data-id="${msg.id}">${ic('mail', 12)}View email</button><a class="btn btn-xs btn-ghost" href="${esc(msg.gmailComposeUrl)}" target="_blank" rel="noopener noreferrer">${ic('external-link', 12)}Gmail</a></div>`,
+                `<div class="row" style="padding:6px 10px;border:1px solid var(--border);border-radius:7px;background:var(--surface-2);font-size:12px;gap:8px"><span class="badge ${msg.deliveredToInbox ? 'green' : 'amber'}"><span class="dot"></span>${msg.deliveredToInbox ? 'Delivered' : 'Ready'}</span><span class="grow trunc"><b>${esc(msg.to)}</b> · ${esc(msg.role)}</span><button type="button" class="btn btn-xs btn-secondary" data-a="previewInviteEmail" data-id="${msg.id}">${ic('mail', 12)}View email</button><a class="btn btn-xs btn-ghost" href="${esc(msg.gmailComposeUrl)}" target="_blank" rel="noopener noreferrer">${ic('external-link', 12)}Gmail</a></div>`,
             )
             .join('')}</div></div>`
         : ''
@@ -306,17 +369,33 @@ export function filePreviewModal(m, H) {
 export function emailPreviewModal(m, H) {
   const msg = m.email || (D().outbox || []).find(x => x.id === m.id);
   if (!msg) return `${H('Invitation email')}<div class="modal-b"><p class="muted">Invitation details not found.</p></div><div class="modal-f"><button class="btn btn-primary" data-a="closeModal">Close</button></div>`;
-  return `${H('Invitation email dispatched', `To: ${esc(msg.to)} · Role: ${esc(msg.role)} · ${ago(msg.sentAt)}`)}
+  const realInbox = !!msg.deliveredToInbox;
+  return `${H(realInbox ? 'Invitation delivered to Gmail inbox' : 'Invitation email ready for Gmail delivery', `To: ${esc(msg.to)} · Role: ${esc(msg.role)} · ${ago(msg.sentAt)}`)}
   <div class="modal-b" style="gap:12px">
-    <div class="alert ok" style="align-items:center">
-      ${ic('circle-check', 16)}
-      <div class="grow">
-        <b>Invitation email sent to ${esc(msg.to)}</b>
-        <div style="font-size:12px;opacity:.9;margin-top:2px">You can also forward directly from your personal Gmail, copy the direct join link, or test accepting the invitation below.</div>
-      </div>
-      ${msg.previewUrl ? `<a class="btn btn-xs btn-secondary" href="${esc(msg.previewUrl)}" target="_blank" rel="noopener noreferrer">${ic('external-link', 12)}Open SMTP Webmail</a>` : ''}
-    </div>
-    <div style="border:1px solid var(--border);border-radius:var(--r-lg);overflow:hidden;background:#F9FAFB;padding:16px;max-height:360px;overflow-y:auto">
+    ${
+      realInbox
+        ? `<div class="alert ok" style="align-items:center">
+            ${ic('circle-check', 16)}
+            <div class="grow">
+              <b>Delivered directly to ${esc(msg.to)}'s real inbox (${esc(msg.transport || 'gmail')})</b>
+              <div style="font-size:12px;opacity:.9;margin-top:2px">The invitation email was dispatched through authenticated Gmail/SMTP and is in ${esc(msg.to)}'s inbox now.</div>
+            </div>
+          </div>`
+        : `<div class="alert info" style="align-items:flex-start;gap:10px">
+            ${ic('mail', 16)}
+            <div class="grow">
+              <b>Deliver directly to ${esc(msg.to)}'s real Gmail inbox:</b>
+              <div style="font-size:12px;opacity:.92;margin-top:3px;line-height:1.45">Sandbox SMTP servers (Ethereal) only store test previews and cannot deliver to external Gmail addresses. Click <b>Deliver via My Google Account</b> below (or configure Gmail SMTP) to send this email directly into <b>${esc(msg.to)}</b>'s real Gmail inbox right now.</div>
+              <div class="row" style="gap:8px;margin-top:9px;flex-wrap:wrap">
+                <button type="button" class="btn btn-xs btn-primary" data-a="deliverViaGoogleOAuth" data-id="${esc(msg.id)}" id="deliver-oauth-btn">${ic('send', 12)}Deliver Now via My Google Account</button>
+                <button type="button" class="btn btn-xs btn-secondary" data-a="toggleSmtpForm">${ic('settings', 12)}Configure Gmail App Password / SMTP</button>
+                ${msg.previewUrl ? `<a class="btn btn-xs btn-ghost" href="${esc(msg.previewUrl)}" target="_blank" rel="noopener noreferrer">${ic('external-link', 12)}Sandbox Preview</a>` : ''}
+              </div>
+            </div>
+          </div>`
+    }
+    ${S.ui.showSmtpForm ? smtpConfigFormHtml() : ''}
+    <div style="border:1px solid var(--border);border-radius:var(--r-lg);overflow:hidden;background:#F9FAFB;padding:16px;max-height:320px;overflow-y:auto">
       <div style="font-size:12px;color:#4B5563;margin-bottom:12px;padding-bottom:10px;border-bottom:1px solid #E5E7EB">
         <div><b>From:</b> ${esc(msg.fromName)} &lt;${esc(msg.from)}&gt;</div>
         <div><b>To:</b> ${esc(msg.to)}</div>
@@ -326,11 +405,11 @@ export function emailPreviewModal(m, H) {
     </div>
   </div>
   <div class="modal-f" style="flex-wrap:wrap;gap:8px">
-    <a class="btn btn-secondary" href="${esc(msg.gmailComposeUrl)}" target="_blank" rel="noopener noreferrer">${ic('mail', 14)}Send via Gmail</a>
-    <a class="btn btn-ghost" href="${esc(msg.mailtoUrl)}">${ic('send', 14)}Mail App</a>
+    <button class="btn btn-primary" data-a="deliverViaGoogleOAuth" data-id="${esc(msg.id)}">${ic('send', 14)}Send via Google Account</button>
+    <a class="btn btn-secondary" href="${esc(msg.gmailComposeUrl)}" target="_blank" rel="noopener noreferrer">${ic('mail', 14)}Open in Gmail Compose</a>
     <button class="btn btn-secondary" data-a="copyText" data-text="${esc(msg.inviteUrl)}">${ic('link', 14)}Copy join link</button>
     <button class="btn btn-secondary" data-a="acceptInviteNow" data-token="${esc(msg.inviteToken)}">${ic('user-check', 14)}Test Join Link</button>
     <span class="sp"></span>
-    <button class="btn btn-primary" data-a="closeModal">Done</button>
+    <button class="btn btn-ghost" data-a="closeModal">Done</button>
   </div>`;
 }

@@ -67,7 +67,7 @@ A.promoteSub = el => {
         priority: t.priority,
         due: s.due || null,
         labels: [...t.labels],
-        desc: s.note ? `<p>${esc(s.note)}</p>` : '',
+        desc: s.note || '',
       });
       t.subtasks = t.subtasks.filter(x => x !== s);
       logAct('converted a subtask of', t, `into ${n.key}`);

@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { applyMarkdownCommand, normalizeHtmlToMarkdown, renderMarkdown } from '../core/markdown.ts';
 import {
   addCommentRecord,
   addFileRecord,
@@ -524,3 +525,53 @@ test('Express REST API endpoints work end-to-end across all domain resources and
     await new Promise<void>(resolve => server.close(() => resolve()));
   }
 });
+
+test('Markdown engine renders GFM headings, bold/italic, code blocks, checklists, tables, @mentions, and task keys safely', () => {
+  const sampleMd = [
+    '# Security Review Summary',
+    'Please check **critical** and *urgent* items with `npm audit` and ~~legacy~~ config.',
+    '',
+    '- [x] Patch authentication flow',
+    '- [ ] Verify WEB-101 with @Sarah Chen',
+    '',
+    '> Zero-trust posture enforced',
+    '',
+    '```ts',
+    'const ok = true;',
+    '```',
+    '',
+    '| Service | Status |',
+    '| :--- | :---: |',
+    '| Auth | Ready |',
+  ].join('\n');
+
+  const html = renderMarkdown(sampleMd, {
+    tasks: [{ id: 't1', key: 'WEB-101' }],
+  });
+
+  assert.ok(html.includes('<h1 class="md-h md-h1">Security Review Summary</h1>'));
+  assert.ok(html.includes('<strong>critical</strong>'));
+  assert.ok(html.includes('<em>urgent</em>'));
+  assert.ok(html.includes('<code class="md-code">npm audit</code>'));
+  assert.ok(html.includes('<del>legacy</del>'));
+  assert.ok(html.includes('class="md-checklist"'));
+  assert.ok(html.includes('class="md-cb md-box on"'));
+  assert.ok(html.includes('data-a="openTask" data-id="t1"'));
+  assert.ok(html.includes('<span class="mention">@Sarah Chen</span>'));
+  assert.ok(html.includes('<blockquote class="md-quote">'));
+  assert.ok(html.includes('class="md-codeblock"'));
+  assert.ok(html.includes('<table class="md-table">'));
+
+  // XSS protection
+  const xss = renderMarkdown('<script>alert(1)</script> [bad](javascript:alert(1))');
+  assert.ok(!xss.includes('<script>'));
+  assert.ok(!xss.includes('href="javascript:'));
+
+  // HTML to Markdown normalization
+  assert.equal(normalizeHtmlToMarkdown('<p>Hello <strong>world</strong></p>'), 'Hello **world**');
+
+  // Toolbar formatting helper
+  const boldRes = applyMarkdownCommand('Hello world', 6, 11, 'bold');
+  assert.equal(boldRes.value, 'Hello **world**');
+});
+
