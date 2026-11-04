@@ -1,0 +1,6 @@
+{
+  "name": "Snapsec TaskTracker",
+  "description": "Calm, structured project management and task tracking workspace for Snapsec.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
