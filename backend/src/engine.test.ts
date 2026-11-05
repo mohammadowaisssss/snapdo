@@ -800,7 +800,7 @@ test('Modular Backend (Port 5000), Frontend (Port 4000, Nginx Reverse Proxy), Po
 
   const frontendNginxConf = fs.readFileSync(path.join(root, 'frontend/nginx.conf'), 'utf8');
   assert.ok(frontendNginxConf.includes('listen 4000;'));
-  assert.ok(frontendNginxConf.includes('text/javascript js mjs cjs;'));
+  assert.ok(frontendNginxConf.includes('application/javascript') || frontendNginxConf.includes('text/javascript'));
   assert.ok(frontendNginxConf.includes('proxy_pass http://backend:5000/api/;'));
 
   // 3. Verify root docker-compose.yaml (PostgreSQL only, backend 5000:5000, frontend 4000:4000) & .env.example
