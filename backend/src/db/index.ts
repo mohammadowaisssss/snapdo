@@ -11,7 +11,31 @@ declare global {
   var _sqliteInstance: Database.Database | undefined;
 }
 
-export const DATA_DIR = path.resolve(process.cwd(), 'data');
+import os from 'node:os';
+
+function resolveWritableDataDir(): string {
+  const preferred = path.resolve(process.cwd(), 'data');
+  try {
+    if (!fs.existsSync(preferred)) {
+      fs.mkdirSync(preferred, { recursive: true });
+    }
+    // Verify directory is genuinely writable
+    fs.accessSync(preferred, fs.constants.W_OK);
+    return preferred;
+  } catch {
+    const fallback = path.join(os.tmpdir(), 'snapsec-data');
+    try {
+      if (!fs.existsSync(fallback)) {
+        fs.mkdirSync(fallback, { recursive: true });
+      }
+      return fallback;
+    } catch {
+      return os.tmpdir();
+    }
+  }
+}
+
+export const DATA_DIR = resolveWritableDataDir();
 export const SQLITE_DB_FILE =
   process.env.NODE_ENV === 'test'
     ? path.join(DATA_DIR, `snapsec-test-${process.pid}.sqlite`)
@@ -280,10 +304,20 @@ CREATE TABLE IF NOT EXISTS sessions (
  */
 export function getSqliteConnection(): Database.Database {
   if (!global._sqliteInstance) {
-    if (!fs.existsSync(DATA_DIR)) {
-      fs.mkdirSync(DATA_DIR, { recursive: true });
+    try {
+      if (!fs.existsSync(DATA_DIR)) {
+        fs.mkdirSync(DATA_DIR, { recursive: true });
+      }
+    } catch {
+      // directory creation handled by fallback
     }
-    const sqlite = new Database(SQLITE_DB_FILE);
+    let sqlite: Database.Database;
+    try {
+      sqlite = new Database(SQLITE_DB_FILE);
+    } catch {
+      // In-memory fallback if filesystem access is completely prohibited
+      sqlite = new Database(':memory:');
+    }
     sqlite.pragma('journal_mode = WAL');
     sqlite.pragma('synchronous = NORMAL');
     sqlite.pragma('foreign_keys = ON');
