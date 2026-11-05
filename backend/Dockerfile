@@ -1,25 +1,21 @@
 # =============================================================================
-# Snapsec TaskTracker — Backend API Dockerfile (Dockerfile.backend)
+# Snapsec TaskTracker — Backend API Dockerfile (backend/Dockerfile)
+# Runs modular Express + Drizzle ORM (PostgreSQL / SQLite WAL) API on port 5000
 # =============================================================================
-FROM node:22-alpine AS base
+FROM node:22-alpine
 
 WORKDIR /app
 
 # Install curl for container healthchecks and build tools for native SQLite bindings
 RUN apk add --no-cache curl python3 make g++
 
-# Install dependencies with clean layer caching
+# Install backend dependencies
 COPY package.json package-lock.json* ./
 RUN npm install --force
 
-# Copy backend source, Drizzle SQL schema, and shared domain modules
-COPY index.html vite.config.ts tsconfig.json metadata.json firebase-applet-config.json* ./
-COPY public/ ./public/
-COPY server.ts ./
+# Copy modular backend source files
+COPY tsconfig.json firebase-applet-config.json* ./
 COPY src/ ./src/
-
-# Pre-build frontend bundle so standalone backend deployments also serve UI with explicit MIME types
-RUN npm run build
 
 # Prepare persistent data directory owned by non-root node user
 RUN mkdir -p /app/data && chown -R node:node /app
@@ -27,14 +23,13 @@ RUN mkdir -p /app/data && chown -R node:node /app
 USER node
 
 ENV NODE_ENV=production \
-    API_ONLY=true \
-    PORT=4000
+    PORT=5000
 
-EXPOSE 4000
+EXPOSE 5000
 
 VOLUME ["/app/data"]
 
 HEALTHCHECK --interval=15s --timeout=5s --start-period=10s --retries=3 \
-  CMD curl -fsS http://localhost:4000/api/health || exit 1
+  CMD curl -fsS http://localhost:5000/api/health || exit 1
 
-CMD ["npx", "tsx", "server.ts"]
+CMD ["npm", "start"]

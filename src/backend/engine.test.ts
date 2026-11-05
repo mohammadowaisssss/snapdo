@@ -739,39 +739,88 @@ test('Security Suite: XSS, SQLi/NoSQLi, Prototype Pollution, SSRF, Open Redirect
   }
 });
 
-test('Dockerization & Arch Linux Server Hosting: explicit JS/CSS/SVG MIME types in Nginx and Express production static server', async () => {
+test('Modular Backend (Port 5000) & Frontend (Port 4000, No Nginx) Dockerization & Explicit JS/CSS MIME Types', async () => {
   const fs = await import('node:fs');
   const path = await import('node:path');
   const root = process.cwd();
 
-  const backendDockerfile = fs.readFileSync(path.join(root, 'Dockerfile.backend'), 'utf8');
+  // 1. Verify /backend folder structure, package.json, Dockerfile (port 5000), and modular source tree
+  const backendPkg = JSON.parse(fs.readFileSync(path.join(root, 'backend/package.json'), 'utf8'));
+  assert.equal(backendPkg.name, 'snapsec-tasktracker-backend');
+  assert.ok(backendPkg.dependencies.express);
+  assert.ok(backendPkg.dependencies['drizzle-orm']);
+  assert.ok(backendPkg.dependencies['better-sqlite3']);
+  assert.ok(backendPkg.dependencies.pg);
+
+  const backendDockerfile = fs.readFileSync(path.join(root, 'backend/Dockerfile'), 'utf8');
   assert.ok(backendDockerfile.includes('FROM node:22-alpine'));
-  assert.ok(backendDockerfile.includes('RUN npm run build'));
-  assert.ok(backendDockerfile.includes('EXPOSE 4000'));
-  assert.ok(backendDockerfile.includes('HEALTHCHECK'));
+  assert.ok(backendDockerfile.includes('RUN npm install --force'));
+  assert.ok(backendDockerfile.includes('PORT=5000'));
+  assert.ok(backendDockerfile.includes('EXPOSE 5000'));
+  assert.ok(backendDockerfile.includes('http://localhost:5000/api/health'));
 
-  const uiDockerfile = fs.readFileSync(path.join(root, 'Dockerfile.ui'), 'utf8');
-  assert.ok(uiDockerfile.includes('FROM node:22-alpine AS builder'));
-  assert.ok(uiDockerfile.includes('RUN npm run build'));
-  assert.ok(uiDockerfile.includes('FROM nginx:1.27-alpine AS runner'));
-  assert.ok(uiDockerfile.includes('COPY docker/nginx.conf'));
+  const modularBackendFiles = [
+    'backend/src/app.ts',
+    'backend/src/server.ts',
+    'backend/src/config/env.ts',
+    'backend/src/config/mime.ts',
+    'backend/src/middleware/security.ts',
+    'backend/src/middleware/rateLimit.ts',
+    'backend/src/db/index.ts',
+    'backend/src/db/schema.ts',
+    'backend/src/db/repository.ts',
+    'backend/src/services/engine.ts',
+    'backend/src/services/mailer.ts',
+    'backend/src/routes/index.ts',
+    'backend/src/routes/health.routes.ts',
+    'backend/src/routes/tasks.routes.ts',
+    'backend/src/routes/comments.routes.ts',
+    'backend/src/routes/projects.routes.ts',
+    'backend/src/routes/teams.routes.ts',
+    'backend/src/routes/members.routes.ts',
+    'backend/src/routes/files.routes.ts',
+    'backend/src/routes/workspace.routes.ts',
+    'backend/src/routes/auth.routes.ts',
+  ];
+  for (const relPath of modularBackendFiles) {
+    assert.ok(fs.existsSync(path.join(root, relPath)), `Missing modular backend file: ${relPath}`);
+  }
 
-  const nginxConf = fs.readFileSync(path.join(root, 'docker/nginx.conf'), 'utf8');
-  assert.ok(nginxConf.includes('text/javascript                                  js mjs cjs;'));
-  assert.ok(nginxConf.includes('add_header Content-Type "text/javascript; charset=utf-8" always;'));
-  assert.ok(nginxConf.includes('add_header Content-Type "text/css; charset=utf-8" always;'));
-  assert.ok(nginxConf.includes('proxy_pass http://backend:4000/api/;'));
-  assert.ok(nginxConf.includes('try_files $uri $uri/ /index.html;'));
+  // 2. Verify /frontend folder structure, package.json, Dockerfile (port 4000, NO Nginx), and Node server.js
+  const frontendPkg = JSON.parse(fs.readFileSync(path.join(root, 'frontend/package.json'), 'utf8'));
+  assert.equal(frontendPkg.name, 'snapsec-tasktracker-frontend');
+  assert.equal(frontendPkg.scripts.start, 'node server.js');
 
+  const frontendDockerfile = fs.readFileSync(path.join(root, 'frontend/Dockerfile'), 'utf8');
+  assert.ok(frontendDockerfile.includes('FROM node:22-alpine'));
+  assert.ok(frontendDockerfile.includes('RUN npm install --force'));
+  assert.ok(frontendDockerfile.includes('RUN npm run build'));
+  assert.ok(frontendDockerfile.includes('PORT=4000'));
+  assert.ok(frontendDockerfile.includes('EXPOSE 4000'));
+  assert.ok(!frontendDockerfile.toLowerCase().includes('nginx'), 'Frontend Dockerfile must NOT use Nginx');
+
+  const frontendServerJs = fs.readFileSync(path.join(root, 'frontend/server.js'), 'utf8');
+  assert.ok(frontendServerJs.includes("'.js': 'text/javascript; charset=utf-8'"));
+  assert.ok(frontendServerJs.includes("'.css': 'text/css; charset=utf-8'"));
+  assert.ok(frontendServerJs.includes("app.use('/api'"));
+  assert.ok(frontendServerJs.includes('http://backend:5000'));
+
+  // 3. Verify root docker-compose.yml (frontend 4000:4000, backend 5000:5000, no Nginx) & .env.example
   const composeFile = fs.readFileSync(path.join(root, 'docker-compose.yml'), 'utf8');
   assert.ok(composeFile.includes('image: postgres:16-alpine'));
-  assert.ok(composeFile.includes('snapsec_pgdata:/var/lib/postgresql/data'));
-  assert.ok(composeFile.includes('dockerfile: Dockerfile.backend'));
-  assert.ok(composeFile.includes('dockerfile: Dockerfile.ui'));
-  assert.ok(composeFile.includes('snapsec_data:/app/data'));
-  assert.ok(composeFile.includes('"3000:80"'));
+  assert.ok(composeFile.includes('context: ./backend'));
+  assert.ok(composeFile.includes('context: ./frontend'));
+  assert.ok(composeFile.includes('5000}:5000"') || composeFile.includes('"5000:5000"'));
+  assert.ok(composeFile.includes('4000}:4000"') || composeFile.includes('"4000:4000"'));
+  assert.ok(composeFile.includes('http://backend:5000'));
+  assert.ok(!composeFile.toLowerCase().includes('nginx'), 'docker-compose.yml must NOT use Nginx');
 
-  // Verify production dist/ bundle exists and serves .js, .css, .svg, and .html with exact Content-Type headers
+  const envExample = fs.readFileSync(path.join(root, '.env.example'), 'utf8');
+  assert.ok(envExample.includes('FRONTEND_PORT=4000'));
+  assert.ok(envExample.includes('BACKEND_PORT=5000'));
+  assert.ok(envExample.includes('BACKEND_URL=http://backend:5000'));
+
+  // 4. Verify production dist/ bundle exists and serves .js, .css, .svg, and .html with exact Content-Type headers
   const distPath = path.join(root, 'dist');
   if (fs.existsSync(path.join(distPath, 'index.html'))) {
     const { createApp, mountCompiledDist } = await import('../../server');
@@ -814,7 +863,7 @@ test('Dockerization & Arch Linux Server Hosting: explicit JS/CSS/SVG MIME types 
 
 test('Relational SQL Database Engine: WAL mode, Foreign Keys, B-tree Indexes, ACID Transactions, and Indexed SQL Queries', async () => {
   const fs = await import('node:fs');
-  const { getSqliteConnection, SQLITE_DB_FILE } = await import('../db/index.ts');
+  const { getSqliteConnection, SQLITE_DB_FILE } = await import('../../backend/src/db/index.ts');
   const {
     insertTaskSql,
     queryTaskByIdSql,
@@ -822,7 +871,7 @@ test('Relational SQL Database Engine: WAL mode, Foreign Keys, B-tree Indexes, AC
     queryWorkspaceMetrics,
     patchTaskSql,
     deleteTasksSql,
-  } = await import('../db/repository.ts');
+  } = await import('../../backend/src/db/repository.ts');
 
   const conn = getSqliteConnection();
 
@@ -904,7 +953,3 @@ test('Relational SQL Database Engine: WAL mode, Foreign Keys, B-tree Indexes, AC
     }
   }
 });
-
-
-
-

@@ -3,8 +3,11 @@
    Connects the frontend workspace store and actions to the Express REST API
    ===================================================================== */
 
+const API_BASE = (typeof import.meta !== 'undefined' && import.meta.env?.VITE_API_BASE_URL ? String(import.meta.env.VITE_API_BASE_URL) : '').replace(/\/+$/, '');
+
 async function request(path, options = {}) {
-  const res = await fetch(path, {
+  const url = path.startsWith('http') ? path : `${API_BASE}${path}`;
+  const res = await fetch(url, {
     headers: {
       'Content-Type': 'application/json',
       ...(options.headers || {}),
