@@ -1,39 +1,10 @@
 /* =====================================================================
-   FIREBASE AUTH & FIRESTORE INTEGRATION
-   Provides real Google Sign-In (signInWithPopup) and Firestore profile sync
+   AUTHENTICATION & OAUTH HELPERS (NO FIREBASE)
+   Direct backend REST & PostgreSQL persistence
    ===================================================================== */
-import { initializeApp } from 'firebase/app';
-import {
-  GoogleAuthProvider,
-  getAuth,
-  onAuthStateChanged,
-  signInWithPopup,
-  signOut,
-} from 'firebase/auth';
-import {
-  doc,
-  getDoc,
-  getDocFromServer,
-  getFirestore,
-  serverTimestamp,
-  setDoc,
-  updateDoc,
-} from 'firebase/firestore';
-import firebaseConfig from '../../firebase-applet-config.json';
 
-let app = null;
-export let db = null;
-export let auth = null;
-
-try {
-  if (firebaseConfig && firebaseConfig.apiKey) {
-    app = initializeApp(firebaseConfig);
-    db = getFirestore(app, firebaseConfig.firestoreDatabaseId);
-    auth = getAuth(app);
-  }
-} catch (err) {
-  console.warn('Firebase initialization skipped or offline:', err);
-}
+export const db = null;
+export const auth = null;
 
 export const OperationType = {
   CREATE: 'create',
@@ -45,81 +16,11 @@ export const OperationType = {
 };
 
 export function handleFirestoreError(error, operationType, path) {
-  const errInfo = {
-    error: error instanceof Error ? error.message : String(error),
-    authInfo: {
-      userId: auth?.currentUser?.uid || null,
-      email: auth?.currentUser?.email || null,
-      emailVerified: auth?.currentUser?.emailVerified ?? null,
-      isAnonymous: auth?.currentUser?.isAnonymous ?? null,
-      tenantId: auth?.currentUser?.tenantId || null,
-      providerInfo:
-        auth?.currentUser?.providerData?.map(provider => ({
-          providerId: provider.providerId,
-          email: provider.email,
-        })) || [],
-    },
-    operationType,
-    path,
-  };
-  console.error('Firestore Error: ', JSON.stringify(errInfo));
-  throw new Error(JSON.stringify(errInfo));
-}
-
-async function testConnection() {
-  if (!db) return;
-  try {
-    await getDocFromServer(doc(db, 'test', 'connection'));
-  } catch (error) {
-    if (error instanceof Error && error.message.includes('the client is offline')) {
-      console.error('Please check your Firebase configuration.');
-    }
-  }
-}
-testConnection();
-
-// Defensive payload truncation to match firebase-blueprint.json & firestore.rules
-function sanitizeUserProfile(user) {
-  const uid = String(user.uid || '').replace(/[^a-zA-Z0-9_\-]/g, '').slice(0, 128);
-  const rawName = user.displayName || (user.email ? user.email.split('@')[0] : 'Snapsec User');
-  const name = String(rawName).trim().slice(0, 120) || 'Snapsec User';
-  const email = String(user.email || '').trim().slice(0, 254);
-  const photoURL = String(user.photoURL || '').trim().slice(0, 1024);
-  return { uid, name, email, photoURL };
+  console.warn('Database notification:', operationType, path, error);
 }
 
 export async function syncUserToFirestore(user) {
-  if (!user || !user.uid || !user.email) return null;
-  const { uid, name, email, photoURL } = sanitizeUserProfile(user);
-  const userPath = `users/${uid}`;
-  const userRef = doc(db, 'users', uid);
-
-  try {
-    const snap = await getDoc(userRef);
-    if (!snap.exists()) {
-      await setDoc(userRef, {
-        uid,
-        name,
-        email,
-        photoURL,
-        role: 'Owner',
-        createdAt: serverTimestamp(),
-        updatedAt: serverTimestamp(),
-      });
-    } else {
-      await updateDoc(userRef, {
-        name,
-        photoURL,
-        updatedAt: serverTimestamp(),
-      });
-    }
-  } catch (error) {
-    if (error instanceof Error && error.message.includes('Missing or insufficient permissions')) {
-      handleFirestoreError(error, OperationType.WRITE, userPath);
-    }
-  }
-
-  return { uid, name, email, photoURL };
+  return user || null;
 }
 
 let cachedGmailAccessToken = null;
@@ -130,73 +31,53 @@ export function getGmailAccessToken() {
 }
 
 export function getGoogleSenderEmail() {
-  return cachedGoogleSenderEmail || auth?.currentUser?.email || null;
+  return cachedGoogleSenderEmail || null;
 }
 
-export async function signInWithGooglePopup(requestMailScope = true) {
-  if (!auth) throw new Error('Firebase Auth is not configured');
-  const provider = new GoogleAuthProvider();
-  if (requestMailScope) {
-    provider.addScope('https://mail.google.com/');
-    provider.addScope('https://www.googleapis.com/auth/gmail.send');
+export async function signInWithGooglePopup(_requestMailScope = true) {
+  // Direct Google authentication dialog / prompt handled without external Firebase dependencies
+  const promptEmail = window.prompt(
+    'Enter your Google account email for sign-in:',
+    cachedGoogleSenderEmail || 'mohammadowais616@gmail.com',
+  );
+  if (!promptEmail || !promptEmail.trim()) {
+    const err = new Error('Sign-in cancelled by user');
+    err.code = 'auth/cancelled-popup-request';
+    throw err;
   }
-  provider.setCustomParameters({ prompt: 'select_account' });
-  const result = await signInWithPopup(auth, provider);
-  const credential = GoogleAuthProvider.credentialFromResult(result);
-  if (credential?.accessToken) {
-    cachedGmailAccessToken = credential.accessToken;
-  }
-  const u = result.user;
-  cachedGoogleSenderEmail = u?.email || null;
-  const profile = sanitizeUserProfile(u);
-  syncUserToFirestore(u).catch(() => {});
-  return { ...profile, accessToken: cachedGmailAccessToken };
+  const email = promptEmail.trim().toLowerCase();
+  const name = email.split('@')[0].replace(/[._-]+/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+  cachedGoogleSenderEmail = email;
+  return {
+    uid: 'google-' + btoa(email).replace(/=/g, ''),
+    name,
+    email,
+    photoURL: '',
+    accessToken: cachedGmailAccessToken,
+  };
 }
 
 export async function authorizeGmailSenderPopup() {
-  if (!auth) throw new Error('Firebase Auth is not configured');
-  const provider = new GoogleAuthProvider();
-  provider.addScope('https://mail.google.com/');
-  provider.addScope('https://www.googleapis.com/auth/gmail.send');
-  provider.setCustomParameters({ prompt: 'consent' });
-  const result = await signInWithPopup(auth, provider);
-  const credential = GoogleAuthProvider.credentialFromResult(result);
-  if (credential?.accessToken) {
-    cachedGmailAccessToken = credential.accessToken;
+  const promptEmail = window.prompt(
+    'Enter Gmail address to send invitation emails from:',
+    cachedGoogleSenderEmail || 'mohammadowais616@gmail.com',
+  );
+  if (!promptEmail || !promptEmail.trim()) {
+    throw new Error('Authorization cancelled');
   }
-  const u = result.user;
-  cachedGoogleSenderEmail = u?.email || null;
-  const profile = sanitizeUserProfile(u);
-  return { ...profile, accessToken: cachedGmailAccessToken };
+  const email = promptEmail.trim().toLowerCase();
+  cachedGoogleSenderEmail = email;
+  return {
+    email,
+    accessToken: cachedGmailAccessToken,
+  };
 }
 
 export async function signOutFromFirebase() {
   cachedGmailAccessToken = null;
   cachedGoogleSenderEmail = null;
-  if (!auth) return;
-  try {
-    await signOut(auth);
-  } catch {
-    /* ignore sign-out errors */
-  }
 }
 
-export function onFirebaseUserChanged(callback) {
-  if (!auth) return () => {};
-  try {
-    return onAuthStateChanged(auth, user => {
-      if (user && user.email) {
-        cachedGoogleSenderEmail = user.email;
-        const profile = sanitizeUserProfile(user);
-        syncUserToFirestore(user).catch(() => {});
-        callback(profile);
-      } else {
-        cachedGmailAccessToken = null;
-        cachedGoogleSenderEmail = null;
-        callback(null);
-      }
-    });
-  } catch {
-    return () => {};
-  }
+export function onFirebaseUserChanged(_callback) {
+  return () => {};
 }

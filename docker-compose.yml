@@ -36,7 +36,6 @@ services:
       PGUSER: ${PGUSER:-snapsec}
       PGPASSWORD: ${PGPASSWORD:-snapsec_prod_secret}
       PGDATABASE: ${PGDATABASE:-snapsec_tasktracker}
-      SQLITE_DB_PATH: /app/data/snapsec.sqlite
       SMTP_HOST: ${SMTP_HOST:-}
       SMTP_PORT: ${SMTP_PORT:-465}
       SMTP_USER: ${SMTP_USER:-}
@@ -47,8 +46,6 @@ services:
     depends_on:
       db:
         condition: service_healthy
-    volumes:
-      - snapsec_data:/app/data
     networks:
       - snapsec_net
     healthcheck:
@@ -64,10 +61,6 @@ services:
       dockerfile: Dockerfile
     container_name: snapsec-tasktracker-frontend
     restart: unless-stopped
-    environment:
-      NODE_ENV: production
-      PORT: 4000
-      BACKEND_URL: ${BACKEND_URL:-http://backend:5000}
     ports:
       - "${FRONTEND_PORT:-4000}:4000"
     depends_on:
@@ -84,8 +77,6 @@ services:
 
 volumes:
   snapsec_pgdata:
-    driver: local
-  snapsec_data:
     driver: local
 
 networks:

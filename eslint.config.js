@@ -1,8 +1,5 @@
-import firebaseRulesPlugin from '@firebase/eslint-plugin-security-rules';
-
 export default [
   {
-    ignores: ['dist/**/*', 'node_modules/**/*', 'data/**/*'],
+    ignores: ['dist/**/*', 'node_modules/**/*', 'data/**/*', 'backend/node_modules/**/*', 'frontend/node_modules/**/*'],
   },
-  firebaseRulesPlugin.configs['flat/recommended'],
 ];

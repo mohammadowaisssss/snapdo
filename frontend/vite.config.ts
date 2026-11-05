@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { icons as lucide } from 'lucide';
 
-function lucideSubset() {
+function lucideSubset(rootDir: string) {
   const id = 'virtual:icons';
   const resolved = '\0' + id;
   const walk = (dir: string): string[] =>
@@ -21,7 +21,8 @@ function lucideSubset() {
     resolveId: (s: string) => (s === id ? resolved : null),
     load(s: string) {
       if (s !== resolved) return null;
-      const text = walk(path.resolve('src'))
+      const srcDir = path.resolve(rootDir, 'src');
+      const text = (fs.existsSync(srcDir) ? walk(srcDir) : [])
         .map(f => fs.readFileSync(f, 'utf8'))
         .join('\n');
       const lucideMap = lucide as Record<string, any>;
@@ -56,7 +57,7 @@ export default defineConfig(() => {
   const backendTarget = process.env.BACKEND_URL || 'http://localhost:5000';
   return {
     base: '/',
-    plugins: [lucideSubset()],
+    plugins: [lucideSubset(rootDir)],
     resolve: {
       alias: {
         '@': rootDir,

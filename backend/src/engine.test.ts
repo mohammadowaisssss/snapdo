@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { applyMarkdownCommand, normalizeHtmlToMarkdown, renderMarkdown } from '../core/markdown.ts';
+import { applyMarkdownCommand, normalizeHtmlToMarkdown, renderMarkdown } from '../../frontend/src/core/markdown.ts';
 import {
   addCommentRecord,
   addFileRecord,
@@ -36,7 +36,7 @@ import {
   updateSubtaskRecord,
   updateTeamRecord,
   validateAuthCredentials,
-} from './engine';
+} from './services/engine.ts';
 
 test('createDefaultState initializes Snapsec workspace with Mohammad Owais owner, tasks, projects, teams, and members', () => {
   const store = createDefaultState();
@@ -250,7 +250,7 @@ test('auth credentials validation enforces email and password policies', () => {
 
 test('Express REST API endpoints work end-to-end across all domain resources and CRUD operations', async () => {
   process.env.NODE_ENV = 'test';
-  const { createApp } = await import('../../server');
+  const { createApp } = await import('./app.ts');
   const app = createApp();
   const server = await new Promise<any>(resolve => {
     const s = app.listen(0, '127.0.0.1', () => resolve(s));
@@ -587,7 +587,7 @@ test('Security Suite: XSS, SQLi/NoSQLi, Prototype Pollution, SSRF, Open Redirect
     sanitizeBaseUrl,
     sanitizeHeaderValue,
     stripDangerousKeys,
-  } = await import('../core/security.ts');
+  } = await import('./utils/security.ts');
 
   // 1. Advanced XSS vectors in Markdown & HTML normalization
   const xssVectors = [
@@ -690,7 +690,7 @@ test('Security Suite: XSS, SQLi/NoSQLi, Prototype Pollution, SSRF, Open Redirect
 
   // 8. End-to-End HTTP Security Headers & Endpoint Penetration Tests
   process.env.NODE_ENV = 'test';
-  const { createApp } = await import('../../server');
+  const { createApp } = await import('./app.ts');
   const app = createApp();
   const server = await new Promise<any>(resolve => {
     const s = app.listen(0, '127.0.0.1', () => resolve(s));
@@ -739,7 +739,7 @@ test('Security Suite: XSS, SQLi/NoSQLi, Prototype Pollution, SSRF, Open Redirect
   }
 });
 
-test('Modular Backend (Port 5000) & Frontend (Port 4000, No Nginx) Dockerization & Explicit JS/CSS MIME Types', async () => {
+test('Modular Backend (Port 5000), Frontend (Port 4000, Nginx Reverse Proxy), PostgreSQL Database & Zero Firebase', async () => {
   const fs = await import('node:fs');
   const path = await import('node:path');
   const root = process.cwd();
@@ -749,8 +749,8 @@ test('Modular Backend (Port 5000) & Frontend (Port 4000, No Nginx) Dockerization
   assert.equal(backendPkg.name, 'snapsec-tasktracker-backend');
   assert.ok(backendPkg.dependencies.express);
   assert.ok(backendPkg.dependencies['drizzle-orm']);
-  assert.ok(backendPkg.dependencies['better-sqlite3']);
   assert.ok(backendPkg.dependencies.pg);
+  assert.equal(backendPkg.dependencies.firebase, undefined);
 
   const backendDockerfile = fs.readFileSync(path.join(root, 'backend/Dockerfile'), 'utf8');
   assert.ok(backendDockerfile.includes('FROM node:22-alpine'));
@@ -786,44 +786,51 @@ test('Modular Backend (Port 5000) & Frontend (Port 4000, No Nginx) Dockerization
     assert.ok(fs.existsSync(path.join(root, relPath)), `Missing modular backend file: ${relPath}`);
   }
 
-  // 2. Verify /frontend folder structure, package.json, Dockerfile (port 4000, NO Nginx), and Node server.js
+  // 2. Verify /frontend folder structure, package.json, Dockerfile (port 4000, Nginx server), and nginx.conf
   const frontendPkg = JSON.parse(fs.readFileSync(path.join(root, 'frontend/package.json'), 'utf8'));
   assert.equal(frontendPkg.name, 'snapsec-tasktracker-frontend');
-  assert.equal(frontendPkg.scripts.start, 'node server.js');
+  assert.equal(frontendPkg.dependencies.firebase, undefined);
 
   const frontendDockerfile = fs.readFileSync(path.join(root, 'frontend/Dockerfile'), 'utf8');
-  assert.ok(frontendDockerfile.includes('FROM node:22-alpine'));
+  assert.ok(frontendDockerfile.includes('FROM node:22-alpine AS builder'));
   assert.ok(frontendDockerfile.includes('RUN npm install --force'));
   assert.ok(frontendDockerfile.includes('RUN npm run build'));
-  assert.ok(frontendDockerfile.includes('PORT=4000'));
+  assert.ok(frontendDockerfile.includes('FROM nginx:1.27-alpine AS runner'));
   assert.ok(frontendDockerfile.includes('EXPOSE 4000'));
-  assert.ok(!frontendDockerfile.toLowerCase().includes('nginx'), 'Frontend Dockerfile must NOT use Nginx');
 
-  const frontendServerJs = fs.readFileSync(path.join(root, 'frontend/server.js'), 'utf8');
-  assert.ok(frontendServerJs.includes("'.js': 'text/javascript; charset=utf-8'"));
-  assert.ok(frontendServerJs.includes("'.css': 'text/css; charset=utf-8'"));
-  assert.ok(frontendServerJs.includes("app.use('/api'"));
-  assert.ok(frontendServerJs.includes('http://backend:5000'));
+  const frontendNginxConf = fs.readFileSync(path.join(root, 'frontend/nginx.conf'), 'utf8');
+  assert.ok(frontendNginxConf.includes('listen 4000;'));
+  assert.ok(frontendNginxConf.includes('text/javascript js mjs cjs;'));
+  assert.ok(frontendNginxConf.includes('proxy_pass http://backend:5000/api/;'));
 
-  // 3. Verify root docker-compose.yml (frontend 4000:4000, backend 5000:5000, no Nginx) & .env.example
-  const composeFile = fs.readFileSync(path.join(root, 'docker-compose.yml'), 'utf8');
+  // 3. Verify root docker-compose.yaml (PostgreSQL only, backend 5000:5000, frontend 4000:4000) & .env.example
+  const composePath = fs.existsSync(path.join(root, 'docker-compose.yaml')) ? path.join(root, 'docker-compose.yaml') : path.join(root, 'docker-compose.yml');
+  assert.ok(fs.existsSync(composePath), 'Missing docker-compose.yaml or docker-compose.yml');
+  const composeFile = fs.readFileSync(composePath, 'utf8');
   assert.ok(composeFile.includes('image: postgres:16-alpine'));
   assert.ok(composeFile.includes('context: ./backend'));
   assert.ok(composeFile.includes('context: ./frontend'));
   assert.ok(composeFile.includes('5000}:5000"') || composeFile.includes('"5000:5000"'));
   assert.ok(composeFile.includes('4000}:4000"') || composeFile.includes('"4000:4000"'));
-  assert.ok(composeFile.includes('http://backend:5000'));
-  assert.ok(!composeFile.toLowerCase().includes('nginx'), 'docker-compose.yml must NOT use Nginx');
+  assert.ok(!composeFile.includes('snapsec_data:'), 'SQLite volume must be removed from docker-compose.yaml');
 
   const envExample = fs.readFileSync(path.join(root, '.env.example'), 'utf8');
   assert.ok(envExample.includes('FRONTEND_PORT=4000'));
   assert.ok(envExample.includes('BACKEND_PORT=5000'));
-  assert.ok(envExample.includes('BACKEND_URL=http://backend:5000'));
+  assert.ok(envExample.includes('PGHOST=db'));
+  assert.ok(envExample.includes('PGDATABASE=snapsec_tasktracker'));
+  assert.ok(!envExample.includes('SQLITE_DB_PATH'), 'SQLite env vars must be removed from .env.example');
 
-  // 4. Verify production dist/ bundle exists and serves .js, .css, .svg, and .html with exact Content-Type headers
+  // 4. Verify firebase is removed
+  assert.equal(fs.existsSync(path.join(root, 'src')), false, 'Root src/ folder must not exist');
+  assert.equal(fs.existsSync(path.join(root, 'firebase-applet-config.json')), false);
+  assert.equal(fs.existsSync(path.join(root, 'firestore.rules')), false);
+  assert.equal(fs.existsSync(path.join(root, 'firebase-blueprint.json')), false);
+
+  // 5. Verify production dist/ bundle exists and serves .js, .css, .svg, and .html with exact Content-Type headers
   const distPath = path.join(root, 'dist');
   if (fs.existsSync(path.join(distPath, 'index.html'))) {
-    const { createApp, mountCompiledDist } = await import('../../server');
+    const { createApp, mountCompiledDist } = await import('./app.ts');
     const app = createApp();
     mountCompiledDist(app, distPath);
     const server = await new Promise<any>(resolve => {
@@ -863,7 +870,7 @@ test('Modular Backend (Port 5000) & Frontend (Port 4000, No Nginx) Dockerization
 
 test('Relational SQL Database Engine: WAL mode, Foreign Keys, B-tree Indexes, ACID Transactions, and Indexed SQL Queries', async () => {
   const fs = await import('node:fs');
-  const { getSqliteConnection, SQLITE_DB_FILE } = await import('../../backend/src/db/index.ts');
+  const { getSqliteConnection, SQLITE_DB_FILE } = await import('./db/index.ts');
   const {
     insertTaskSql,
     queryTaskByIdSql,
@@ -871,7 +878,7 @@ test('Relational SQL Database Engine: WAL mode, Foreign Keys, B-tree Indexes, AC
     queryWorkspaceMetrics,
     patchTaskSql,
     deleteTasksSql,
-  } = await import('../../backend/src/db/repository.ts');
+  } = await import('./db/repository.ts');
 
   const conn = getSqliteConnection();
 

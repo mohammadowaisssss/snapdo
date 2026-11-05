@@ -1,23 +1,28 @@
 /* ============================================================================
    Snapsec TaskTracker — Root Unified Server Entrypoint
    Delegates all API routes, middleware, and SQL persistence to the modular
-   backend architecture in ./backend/src/app.ts while serving the Vite frontend.
+   backend architecture in ./backend/src/app.ts while serving the frontend from ./frontend.
    ============================================================================ */
 import fs from 'node:fs';
 import path from 'node:path';
 import { createServer as createViteServer } from 'vite';
 import { EXPLICIT_MIME_TYPES, createApp, mountCompiledDist } from './backend/src/app.ts';
+import { syncPostgresMirrorIfEnabled } from './backend/src/db/repository.ts';
 
 export { EXPLICIT_MIME_TYPES, createApp, mountCompiledDist };
 
 async function startServer() {
+  await syncPostgresMirrorIfEnabled();
   const app = createApp();
   const PORT = Number(process.env.PORT || 3000);
   const distPath = path.join(process.cwd(), 'dist');
   const distIndex = path.join(distPath, 'index.html');
+  const frontendDir = path.resolve('frontend');
 
   if (process.env.NODE_ENV !== 'production') {
     const vite = await createViteServer({
+      configFile: path.resolve('vite.config.ts'),
+      root: frontendDir,
       server: { middlewareMode: true, allowedHosts: true as const },
       appType: 'spa',
     });
@@ -37,6 +42,8 @@ async function startServer() {
       mountCompiledDist(app, distPath);
     } else {
       const vite = await createViteServer({
+        configFile: path.resolve('vite.config.ts'),
+        root: frontendDir,
         server: { middlewareMode: true, allowedHosts: true as const },
         appType: 'spa',
       });

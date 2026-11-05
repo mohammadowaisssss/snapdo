@@ -4,7 +4,7 @@ import path from 'node:path';
 import { icons as lucide } from 'lucide';
 
 /* `virtual:icons` exports only the Lucide icons the source actually names, as inline SVG markup,
-   so the bundle carries ~170 icons instead of the full set. Any quoted kebab-case token in src/
+   so the bundle carries ~170 icons instead of the full set. Any quoted kebab-case token in frontend/src/
    that matches a Lucide icon name is included. */
 function lucideSubset() {
   const id = 'virtual:icons';
@@ -24,7 +24,12 @@ function lucideSubset() {
     resolveId: (s: string) => (s === id ? resolved : null),
     load(s: string) {
       if (s !== resolved) return null;
-      const text = walk(path.resolve('src'))
+      const scanDir = fs.existsSync(path.resolve('frontend/src'))
+        ? path.resolve('frontend/src')
+        : fs.existsSync(path.resolve('src'))
+          ? path.resolve('src')
+          : null;
+      const text = (scanDir && fs.existsSync(scanDir) ? walk(scanDir) : [])
         .map(f => fs.readFileSync(f, 'utf8'))
         .join('\n');
       const lucideMap = lucide as Record<string, any>;
@@ -47,7 +52,7 @@ function lucideSubset() {
                 .map(([k, v]) => `${k}="${v}"`)
                 .join(' ')}/>`,
           )
-          .join('');
+        .join('');
       }
       return `export const ICONS = ${JSON.stringify(out)};`;
     },
@@ -55,17 +60,19 @@ function lucideSubset() {
 }
 
 export default defineConfig(() => {
-  const rootDir = typeof import.meta.dirname === 'string' ? import.meta.dirname : path.resolve();
+  const frontendDir = path.resolve('frontend');
   return {
+    root: frontendDir,
     base: '/',
     plugins: [lucideSubset()],
     resolve: {
       alias: {
-        '@': rootDir,
+        '@': frontendDir,
       },
     },
     build: {
-      outDir: 'dist',
+      outDir: path.resolve('dist'),
+      emptyOutDir: true,
       assetsDir: 'assets',
       chunkSizeWarningLimit: 1500,
     },
@@ -74,9 +81,7 @@ export default defineConfig(() => {
       host: '0.0.0.0',
       allowedHosts: true as const,
       // HMR is disabled in AI Studio via DISABLE_HMR env var.
-      // Do not modify—file watching is disabled to prevent flickering during agent edits.
       hmr: process.env.DISABLE_HMR !== 'true',
-      // Disable file watching when DISABLE_HMR is true to save CPU during agent edits.
       watch: process.env.DISABLE_HMR === 'true' ? null : {},
     },
     preview: {
@@ -86,4 +91,3 @@ export default defineConfig(() => {
     },
   };
 });
-

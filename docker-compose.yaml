@@ -1,0 +1,84 @@
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: snapsec-tasktracker-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${PGUSER:-snapsec}
+      POSTGRES_PASSWORD: ${PGPASSWORD:-snapsec_prod_secret}
+      POSTGRES_DB: ${PGDATABASE:-snapsec_tasktracker}
+    ports:
+      - "5432:5432"
+    volumes:
+      - snapsec_pgdata:/var/lib/postgresql/data
+    networks:
+      - snapsec_net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${PGUSER:-snapsec} -d ${PGDATABASE:-snapsec_tasktracker}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: snapsec-tasktracker-backend
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      PORT: 5000
+      APP_URL: ${APP_URL:-http://localhost:4000}
+      CORS_ORIGIN: ${CORS_ORIGIN:-*}
+      PGHOST: ${PGHOST:-db}
+      PGPORT: ${PGPORT:-5432}
+      PGUSER: ${PGUSER:-snapsec}
+      PGPASSWORD: ${PGPASSWORD:-snapsec_prod_secret}
+      PGDATABASE: ${PGDATABASE:-snapsec_tasktracker}
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-465}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASS: ${SMTP_PASS:-}
+      SMTP_FROM: ${SMTP_FROM:-mohammadowais616@gmail.com}
+    ports:
+      - "${BACKEND_PORT:-5000}:5000"
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - snapsec_net
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:5000/api/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: snapsec-tasktracker-frontend
+    restart: unless-stopped
+    ports:
+      - "${FRONTEND_PORT:-4000}:4000"
+    depends_on:
+      backend:
+        condition: service_healthy
+    networks:
+      - snapsec_net
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:4000/"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+
+volumes:
+  snapsec_pgdata:
+    driver: local
+
+networks:
+  snapsec_net:
+    driver: bridge
