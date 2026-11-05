@@ -10,7 +10,7 @@ RUN apk add --no-cache curl python3 make g++
 
 # Install dependencies with clean layer caching
 COPY package.json package-lock.json* ./
-RUN npm install --include=dev && npm cache clean --force
+RUN npm install --force
 
 # Copy backend source, Drizzle SQL schema, and shared domain modules
 COPY tsconfig.json firebase-applet-config.json* ./
