@@ -575,3 +575,197 @@ test('Markdown engine renders GFM headings, bold/italic, code blocks, checklists
   assert.equal(boldRes.value, 'Hello **world**');
 });
 
+test('Security Suite: XSS, SQLi/NoSQLi, Prototype Pollution, SSRF, Open Redirect, and Header Injection defenses', async () => {
+  const {
+    isSafeEmoji,
+    isSafeSmtpTarget,
+    safeCssColor,
+    safeDownloadUrl,
+    safeHref,
+    safeImageSrc,
+    safePdfSrc,
+    sanitizeBaseUrl,
+    sanitizeHeaderValue,
+    stripDangerousKeys,
+  } = await import('../core/security.ts');
+
+  // 1. Advanced XSS vectors in Markdown & HTML normalization
+  const xssVectors = [
+    '<script>window.__xss = 1;</script>',
+    '<img src=x onerror="alert(1)">',
+    '<svg onload="alert(1)">',
+    '<iframe src="javascript:alert(1)"></iframe>',
+    '[Click me](javascript:alert(document.cookie))',
+    '[Click me](data:text/html;base64,PHNjcmlwdD5hbGVydCgxKTwvc2NyaXB0Pg==)',
+    '![evil svg](data:image/svg+xml;base64,PHN2ZyBvbmxvYWQ9ImFsZXJ0KDEpIj48L3N2Zz4=)',
+    '<p><a href="javascript:alert(1)">Evil Link</a></p>',
+    '**[xss](vbscript:msgbox(1))**',
+    '![breakout](https://example.com/a.png"onload="alert(1))',
+  ];
+  for (const payload of xssVectors) {
+    const rendered = renderMarkdown(payload);
+    assert.ok(!rendered.includes('<script'), `Leaked <script in: ${rendered}`);
+    assert.ok(!rendered.includes('<svg'), `Leaked <svg in: ${rendered}`);
+    assert.ok(!rendered.includes('<iframe'), `Leaked <iframe in: ${rendered}`);
+    assert.ok(!/<[^>]+on(?:error|load)\s*=/i.test(rendered), `Leaked event handler attribute in: ${rendered}`);
+    assert.ok(!rendered.includes('href="javascript:'), `Leaked javascript: href in: ${rendered}`);
+    assert.ok(!rendered.includes('src="javascript:'), `Leaked javascript: src in: ${rendered}`);
+    assert.ok(!rendered.includes('src="data:text/html'), `Leaked data:text/html in: ${rendered}`);
+    assert.ok(!rendered.includes('src="data:image/svg+xml'), `Leaked data:image/svg+xml in: ${rendered}`);
+  }
+
+  // 2. Safe URL & MIME validators
+  assert.equal(safeImageSrc('javascript:alert(1)'), '');
+  assert.equal(safeImageSrc('data:text/html,<script>alert(1)</script>'), '');
+  assert.equal(safeImageSrc('data:image/svg+xml;base64,PHN2Zz4='), '');
+  assert.ok(safeImageSrc('data:image/png;base64,iVBORw0KGgo='));
+  assert.ok(safeImageSrc('https://suite.snapsec.co/media/logos/snapsec.svg'));
+
+  assert.equal(safePdfSrc('javascript:alert(1)'), '');
+  assert.equal(safePdfSrc('data:text/html;base64,PHNjcmlwdD4='), '');
+  assert.ok(safePdfSrc('data:application/pdf;base64,JVBERi0xLjQK'));
+
+  assert.equal(safeDownloadUrl('javascript:alert(1)'), '');
+  assert.equal(safeDownloadUrl('data:text/html;base64,PHNjcmlwdD4='), '');
+  assert.equal(safeDownloadUrl('data:image/svg+xml;base64,PHN2Zz4='), '');
+  assert.ok(safeDownloadUrl('data:application/pdf;base64,JVBERi0xLjQK'));
+
+  assert.equal(safeHref('javascript:alert(1)'), '');
+  assert.equal(safeHref('data:text/html,<script>'), '');
+  assert.equal(safeHref('//evil.com/phish'), '');
+  assert.equal(safeHref('https://snapsec.co/docs'), 'https://snapsec.co/docs');
+
+  assert.equal(safeCssColor('red; background:url(javascript:alert(1))', '#000'), '#000');
+  assert.equal(safeCssColor('#5A67D8'), '#5A67D8');
+
+  // 3. Prototype Pollution & NoSQL Operator Stripping
+  const maliciousPayload = JSON.parse(
+    '{"title":"Safe","__proto__":{"polluted":true},"constructor":{"prototype":{"polluted":true}},"$where":"this.a == 1","nested":{"__proto__":{"bad":1}}}',
+  );
+  const cleaned = stripDangerousKeys(maliciousPayload);
+  assert.equal(({} as any).polluted, undefined);
+  assert.equal((cleaned as any).$where, undefined);
+  assert.equal(Object.prototype.hasOwnProperty.call(cleaned, '__proto__'), false);
+  assert.equal(Object.prototype.hasOwnProperty.call(cleaned, 'constructor'), false);
+
+  const { data } = createDefaultState();
+  const task = createTaskRecord(data, maliciousPayload);
+  applyTaskPatch(data, task.id, JSON.parse('{"__proto__":{"isAdmin":true},"unallowedInternalField":"hacked"}'));
+  assert.equal(({} as any).isAdmin, undefined);
+  assert.equal((task as any).unallowedInternalField, undefined);
+
+  // 4. SQLi & NoSQLi filter resilience
+  const sqliResults = filterTasks(data, {
+    project: { $ne: 'p1' } as any,
+    status: ['todo', 'done'] as any,
+    q: "' OR '1'='1' -- DROP TABLE tasks;",
+  });
+  assert.equal(sqliResults.length, 0);
+
+  // 5. Reaction Emoji XSS validation
+  const cmt = addCommentRecord(data, 't1', 'Security test comment', 'm1');
+  assert.ok(cmt);
+  const badReaction = toggleCommentReaction(data, cmt.id, '<img src=x onerror=alert(1)>', 'm1');
+  assert.equal(badReaction, null);
+  assert.equal(isSafeEmoji('<script>'), false);
+  assert.equal(isSafeEmoji('🔥'), true);
+
+  // 6. SSRF Target Validation for SMTP
+  assert.equal(isSafeSmtpTarget('127.0.0.1', 465).ok, false);
+  assert.equal(isSafeSmtpTarget('localhost', 587).ok, false);
+  assert.equal(isSafeSmtpTarget('169.254.169.254', 465).ok, false);
+  assert.equal(isSafeSmtpTarget('metadata.google.internal', 465).ok, false);
+  assert.equal(isSafeSmtpTarget('10.0.0.1', 465).ok, false);
+  assert.equal(isSafeSmtpTarget('192.168.1.1', 465).ok, false);
+  assert.equal(isSafeSmtpTarget('172.16.0.5', 465).ok, false);
+  assert.equal(isSafeSmtpTarget('smtp.gmail.com', 22).ok, false);
+  assert.equal(isSafeSmtpTarget('smtp.gmail.com', 6379).ok, false);
+  assert.equal(isSafeSmtpTarget('smtp.gmail.com', 465).ok, true);
+
+  // 7. CRLF Header Injection & Open Redirect baseUrl sanitization
+  assert.equal(sanitizeHeaderValue('user@snapsec.com\r\nBcc: attacker@evil.com'), 'user@snapsec.com Bcc: attacker@evil.com');
+  assert.equal(sanitizeBaseUrl('javascript:alert(1)', 'http://localhost:3000'), 'http://localhost:3000');
+  assert.equal(sanitizeBaseUrl('https://user:pass@evil.com/path', 'http://localhost:3000'), 'http://localhost:3000');
+  assert.equal(sanitizeBaseUrl('https://suite.snapsec.co/subpath?foo=1', 'http://localhost:3000'), 'https://suite.snapsec.co');
+
+  // 8. End-to-End HTTP Security Headers & Endpoint Penetration Tests
+  process.env.NODE_ENV = 'test';
+  const { createApp } = await import('../../server');
+  const app = createApp();
+  const server = await new Promise<any>(resolve => {
+    const s = app.listen(0, '127.0.0.1', () => resolve(s));
+  });
+  const base = `http://127.0.0.1:${server.address().port}`;
+
+  try {
+    const healthResp = await fetch(`${base}/api/health`);
+    assert.equal(healthResp.headers.get('x-content-type-options'), 'nosniff');
+    assert.equal(healthResp.headers.get('referrer-policy'), 'strict-origin-when-cross-origin');
+    assert.ok(healthResp.headers.get('content-security-policy')?.includes("default-src 'self'"));
+    assert.ok(healthResp.headers.get('content-security-policy')?.includes("object-src 'none'"));
+    assert.equal(healthResp.headers.get('x-powered-by'), null);
+
+    // SSRF attempt on /api/settings/smtp must return 400
+    const ssrfRes = await fetch(`${base}/api/settings/smtp`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ host: '169.254.169.254', port: 80, user: 'root', pass: 'secret' }),
+    });
+    assert.equal(ssrfRes.status, 400);
+
+    // Malicious XSS reaction via API must return 404/rejected
+    const xssReactRes = await fetch(`${base}/api/comments/c1/reactions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ emoji: '<svg onload=alert(1)>' }),
+    });
+    assert.equal(xssReactRes.status, 404);
+
+    // Malicious file upload with javascript: dataUrl must strip dataUrl to null
+    const badFileRes = await fetch(`${base}/api/files`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        name: 'exploit.pdf',
+        type: 'pdf',
+        project: 'p1',
+        dataUrl: 'javascript:alert(document.domain)',
+      }),
+    }).then(r => r.json());
+    assert.equal(badFileRes.file.dataUrl, null);
+    await fetch(`${base}/api/files/${badFileRes.file.id}`, { method: 'DELETE' });
+  } finally {
+    await new Promise<void>(resolve => server.close(() => resolve()));
+  }
+});
+
+test('Dockerization files (Dockerfile.backend, Dockerfile.ui, docker/nginx.conf, docker-compose.yml) are valid and complete', async () => {
+  const fs = await import('node:fs');
+  const path = await import('node:path');
+  const root = process.cwd();
+
+  const backendDockerfile = fs.readFileSync(path.join(root, 'Dockerfile.backend'), 'utf8');
+  assert.ok(backendDockerfile.includes('FROM node:22-alpine'));
+  assert.ok(backendDockerfile.includes('API_ONLY=true'));
+  assert.ok(backendDockerfile.includes('EXPOSE 4000'));
+  assert.ok(backendDockerfile.includes('HEALTHCHECK'));
+
+  const uiDockerfile = fs.readFileSync(path.join(root, 'Dockerfile.ui'), 'utf8');
+  assert.ok(uiDockerfile.includes('FROM node:22-alpine AS builder'));
+  assert.ok(uiDockerfile.includes('RUN npm run build'));
+  assert.ok(uiDockerfile.includes('FROM nginx:1.27-alpine AS runner'));
+  assert.ok(uiDockerfile.includes('COPY docker/nginx.conf'));
+
+  const nginxConf = fs.readFileSync(path.join(root, 'docker/nginx.conf'), 'utf8');
+  assert.ok(nginxConf.includes('proxy_pass http://backend:4000/api/;'));
+  assert.ok(nginxConf.includes('try_files $uri $uri/ /index.html;'));
+
+  const composeFile = fs.readFileSync(path.join(root, 'docker-compose.yml'), 'utf8');
+  assert.ok(composeFile.includes('dockerfile: Dockerfile.backend'));
+  assert.ok(composeFile.includes('dockerfile: Dockerfile.ui'));
+  assert.ok(composeFile.includes('snapsec_data:/app/data'));
+  assert.ok(composeFile.includes('"3000:80"'));
+});
+
+
+

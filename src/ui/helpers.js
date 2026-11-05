@@ -4,19 +4,22 @@ import { ic } from '../core/icons.js';
 import { LB, PR, PSTAT, ST } from '../core/constants.js';
 import { D, S, mem, pColor } from '../core/store.js';
 import { renderMarkdown } from '../core/markdown.ts';
+import { safeCssColor, safeImageSrc, safePdfSrc } from '../core/security.ts';
 
 export function av(id, cls = '', tip = true) {
   const m = mem(id);
   if (!m) return `<span class="av empty ${cls}" ${tip ? 'data-tip="Unassigned"' : ''}>${ic('user', 11)}</span>`;
-  const ini = m.name
+  const ini = String(m.name || '')
     .split(' ')
-    .map(x => x[0])
+    .map(x => x[0] || '')
     .join('')
     .slice(0, 2);
-  if (m.photoURL) {
-    return `<span class="av ${cls}" style="--c:${m.c};overflow:hidden;padding:0" ${tip ? `data-tip="${esc(m.name)}"` : ''} aria-label="${esc(m.name)}"><img src="${esc(m.photoURL)}" alt="${esc(m.name)}" referrerpolicy="no-referrer" style="width:100%;height:100%;object-fit:cover;border-radius:inherit;display:block" onerror="this.replaceWith(document.createTextNode('${esc(ini)}'))"></span>`;
+  const safePhoto = safeImageSrc(m.photoURL);
+  const safeColor = safeCssColor(m.c, '#5A67D8');
+  if (safePhoto) {
+    return `<span class="av ${cls}" style="--c:${safeColor};overflow:hidden;padding:0" ${tip ? `data-tip="${esc(m.name)}"` : ''} aria-label="${esc(m.name)}"><img src="${esc(safePhoto)}" alt="${esc(m.name)}" referrerpolicy="no-referrer" style="width:100%;height:100%;object-fit:cover;border-radius:inherit;display:block"></span>`;
   }
-  return `<span class="av ${cls}" style="--c:${m.c}" ${tip ? `data-tip="${esc(m.name)}"` : ''} aria-label="${esc(m.name)}">${ini}</span>`;
+  return `<span class="av ${cls}" style="--c:${safeColor}" ${tip ? `data-tip="${esc(m.name)}"` : ''} aria-label="${esc(m.name)}">${esc(ini)}</span>`;
 }
 export function avStack(ids, max = 4, cls = 'sm') {
   const v = ids.slice(0, max);
@@ -133,8 +136,9 @@ export function fsize(b) {
 export function filePrev(f) {
   const t = FT[f.type] || FT.other;
   let art;
-  if (f.dataUrl && (f.type === 'img' || String(f.dataUrl).startsWith('data:image/'))) {
-    art = `<div class="art" style="padding:0;overflow:hidden;background:var(--surface-2)"><img src="${esc(f.dataUrl)}" alt="${esc(f.name)}" style="width:100%;height:100%;object-fit:cover;display:block"></div>`;
+  const safeImg = safeImageSrc(f.dataUrl);
+  if (safeImg && (f.type === 'img' || String(f.dataUrl).startsWith('data:image/'))) {
+    art = `<div class="art" style="padding:0;overflow:hidden;background:var(--surface-2)"><img src="${esc(safeImg)}" alt="${esc(f.name)}" style="width:100%;height:100%;object-fit:cover;display:block"></div>`;
   } else if (f.type === 'img')
     art = `<div class="art" style="padding:0;overflow:hidden;background:linear-gradient(135deg,color-mix(in srgb,${t.c} 35%,var(--surface)),color-mix(in srgb,${t.c} 10%,var(--surface)))"><svg viewBox="0 0 100 60" preserveAspectRatio="none" style="width:100%;height:100%"><path d="M0 60 L30 28 L52 46 L70 32 L100 58 L100 60Z" fill="color-mix(in srgb,${t.c} 45%,var(--surface))"/><circle cx="76" cy="16" r="7" fill="color-mix(in srgb,${t.c} 30%,var(--surface))"/></svg></div>`;
   else if (f.type === 'sheet') art = `<div class="art" style="display:grid;grid-template-columns:repeat(4,1fr);gap:3px">${'<i></i>'.repeat(20)}</div>`;
@@ -142,7 +146,7 @@ export function filePrev(f) {
     art = `<div class="art" style="flex-direction:row;gap:6px"><div style="flex:1;display:flex;flex-direction:column;gap:5px"><i class="h"></i><i></i><i style="width:70%"></i><i style="height:18px;background:color-mix(in srgb,${t.c} 20%,var(--surface))"></i></div><div style="width:34%;border-radius:3px;background:color-mix(in srgb,${t.c} 14%,var(--surface))"></div></div>`;
   else if (f.type === 'zip') art = `<div style="color:${t.c}">${ic('folder-archive', 30)}</div>`;
   else art = `<div class="art"><i class="h"></i><i></i><i></i><i style="width:80%"></i><i></i><i style="width:60%"></i></div>`;
-  const ext = (f.name.split('.').pop() || '').slice(0, 4);
+  const ext = (String(f.name || '').split('.').pop() || '').slice(0, 4);
   return `<div class="fprev">${art}<span class="ext" style="--c:${t.c}">${esc(ext)}</span></div>`;
 }
 
@@ -150,17 +154,19 @@ export function fileFullPreview(f) {
   if (!f) return '';
   const t = FT[f.type] || FT.other;
 
-  // 1. Uploaded image with dataUrl
-  if (f.dataUrl && (f.type === 'img' || String(f.dataUrl).startsWith('data:image/'))) {
+  // 1. Uploaded image with validated safe image dataUrl
+  const safeImg = safeImageSrc(f.dataUrl);
+  if (safeImg && (f.type === 'img' || String(f.dataUrl).startsWith('data:image/'))) {
     return `<div style="background:var(--surface-2);display:flex;align-items:center;justify-content:center;min-height:280px;max-height:460px;overflow:auto;padding:16px">
-      <img src="${esc(f.dataUrl)}" alt="${esc(f.name)}" style="max-width:100%;max-height:420px;object-fit:contain;border-radius:8px;box-shadow:0 4px 16px rgba(0,0,0,.08)">
+      <img src="${esc(safeImg)}" alt="${esc(f.name)}" style="max-width:100%;max-height:420px;object-fit:contain;border-radius:8px;box-shadow:0 4px 16px rgba(0,0,0,.08)">
     </div>`;
   }
 
-  // 2. Uploaded PDF with dataUrl
-  if (f.dataUrl && (f.type === 'pdf' || String(f.dataUrl).startsWith('data:application/pdf'))) {
+  // 2. Uploaded PDF with validated safe PDF dataUrl
+  const safePdf = safePdfSrc(f.dataUrl);
+  if (safePdf) {
     return `<div style="background:var(--surface-2);height:420px">
-      <iframe src="${esc(f.dataUrl)}" title="${esc(f.name)}" style="width:100%;height:100%;border:none"></iframe>
+      <iframe src="${esc(safePdf)}" title="${esc(f.name)}" sandbox="" style="width:100%;height:100%;border:none"></iframe>
     </div>`;
   }
 

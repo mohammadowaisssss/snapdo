@@ -1,6 +1,58 @@
 import { seed } from '../data/seed.js';
 import { PCOLORS, PR, PSTAT, ST, TEAMS_SEED } from '../core/constants.js';
 import { TODAY, addD, dOff, diffD, esc, fmtDate, iso, parse, uid } from '../core/utils.js';
+import {
+  isSafeEmoji,
+  safeCssColor,
+  safeDownloadUrl,
+  safeImageSrc,
+  safeString,
+  sanitizeBaseUrl,
+  sanitizeHeaderValue,
+  stripDangerousKeys,
+} from '../core/security.ts';
+
+const ALLOWED_TASK_PATCH_KEYS = new Set([
+  'project',
+  'title',
+  'status',
+  'assignee',
+  'priority',
+  'due',
+  'start',
+  'labels',
+  'subtasks',
+  'attachments',
+  'deps',
+  'desc',
+  'estimate',
+  'order',
+  'fav',
+  'recur',
+  'archived',
+  'completedAt',
+  'prevStatus',
+]);
+
+const ALLOWED_PROJECT_PATCH_KEYS = new Set([
+  'name',
+  'icon',
+  'color',
+  'status',
+  'team',
+  'lead',
+  'due',
+  'start',
+  'fav',
+  'members',
+  'desc',
+  'milestones',
+  'archived',
+  'archivedAt',
+  'private',
+  'access',
+  'perms',
+]);
 
 export const DEFAULT_PREFS = {
   theme: 'system',
@@ -86,7 +138,7 @@ export interface PersistedStore {
 }
 
 export function createDefaultState(): PersistedStore {
-  const data = seed();
+  const data: any = seed();
   if (!data.teams) {
     data.teams = TEAMS_SEED.map((t: any) => ({ ...t }));
   }
@@ -196,7 +248,8 @@ export function computeWorkspaceMetrics(data: any) {
   };
 }
 
-export function createTaskRecord(data: any, input: Record<string, any>) {
+export function createTaskRecord(data: any, rawInput: Record<string, any>) {
+  const input = stripDangerousKeys(rawInput || {});
   const p =
     (data.projects || []).find((pr: any) => pr.id === input.project) ||
     (data.projects || []).find((pr: any) => !pr.archived) ||
@@ -205,29 +258,29 @@ export function createTaskRecord(data: any, input: Record<string, any>) {
   const now = Date.now();
   const newTask: any = {
     project: p.id,
-    title: 'Untitled',
-    status: 'todo',
-    assignee: null,
-    priority: 'none',
-    due: null,
-    start: null,
-    labels: [],
-    subtasks: [],
-    attachments: [],
-    deps: [],
-    desc: '',
-    estimate: null,
-    created: now,
+    title: safeString(input.title, 500, 'Untitled') || 'Untitled',
+    status: typeof input.status === 'string' && (ST as any)[input.status] ? input.status : 'todo',
+    assignee: typeof input.assignee === 'string' ? input.assignee : null,
+    priority: typeof input.priority === 'string' && (PR as any)[input.priority] ? input.priority : 'none',
+    due: typeof input.due === 'string' ? input.due : null,
+    start: typeof input.start === 'string' ? input.start : null,
+    labels: Array.isArray(input.labels) ? input.labels.filter((l: any) => typeof l === 'string') : [],
+    subtasks: Array.isArray(input.subtasks) ? stripDangerousKeys(input.subtasks) : [],
+    attachments: Array.isArray(input.attachments) ? stripDangerousKeys(input.attachments) : [],
+    deps: Array.isArray(input.deps) ? input.deps.filter((d: any) => typeof d === 'string') : [],
+    desc: typeof input.desc === 'string' ? input.desc : '',
+    estimate: input.estimate ?? null,
+    created: typeof input.created === 'number' ? input.created : now,
     updated: now,
-    order: maxOrder + 1,
-    fav: false,
-    recur: null,
-    archived: false,
-    ...input,
+    order: typeof input.order === 'number' ? input.order : maxOrder + 1,
+    fav: !!input.fav,
+    recur: typeof input.recur === 'string' ? input.recur : null,
+    archived: !!input.archived,
+    completedAt: input.completedAt ?? null,
   };
   newTask.project = p.id;
-  newTask.id = input.id || uid('t');
-  newTask.key = input.key || nextTaskKey(p);
+  newTask.id = typeof input.id === 'string' && input.id.trim() ? input.id.trim() : uid('t');
+  newTask.key = typeof input.key === 'string' && input.key.trim() ? input.key.trim() : nextTaskKey(p);
   if (newTask.start && newTask.due && newTask.start > newTask.due) {
     newTask.start = newTask.due;
   }
@@ -236,12 +289,14 @@ export function createTaskRecord(data: any, input: Record<string, any>) {
   return newTask;
 }
 
-export function applyTaskPatch(data: any, taskId: string, patch: Record<string, any>) {
+export function applyTaskPatch(data: any, taskId: string, rawPatch: Record<string, any>) {
   const t = (data.tasks || []).find((x: any) => x.id === taskId);
   if (!t) return null;
+  const patch = stripDangerousKeys(rawPatch || {});
   const messages: string[] = [];
 
   for (const k of Object.keys(patch)) {
+    if (!ALLOWED_TASK_PATCH_KEYS.has(k)) continue;
     const oldVal = t[k];
     const newVal = patch[k];
     if (JSON.stringify(oldVal) === JSON.stringify(newVal)) continue;
@@ -353,30 +408,35 @@ export function deleteTaskRecords(data: any, taskIds: string[]) {
 
 export function filterTasks(data: any, query: Record<string, any> = {}) {
   let list = [...(data.tasks || [])];
-  if (query.archived === 'true' || query.archived === true) {
+  const arch = query.archived;
+  if (arch === 'true' || arch === true) {
     list = list.filter(t => !!t.archived);
-  } else if (query.archived !== 'all') {
+  } else if (arch !== 'all') {
     list = list.filter(t => !t.archived);
   }
-  if (query.project) {
-    list = list.filter(t => t.project === query.project);
+  const projectFilter = safeString(query.project, 100);
+  if (projectFilter) {
+    list = list.filter(t => t.project === projectFilter);
   }
-  if (query.status) {
-    list = list.filter(t => t.status === query.status);
+  const statusFilter = safeString(query.status, 50);
+  if (statusFilter) {
+    list = list.filter(t => t.status === statusFilter);
   }
-  if (query.assignee) {
-    list = list.filter(t => t.assignee === query.assignee);
+  const assigneeFilter = safeString(query.assignee, 100);
+  if (assigneeFilter) {
+    list = list.filter(t => t.assignee === assigneeFilter);
   }
-  if (query.priority) {
-    list = list.filter(t => t.priority === query.priority);
+  const priorityFilter = safeString(query.priority, 50);
+  if (priorityFilter) {
+    list = list.filter(t => t.priority === priorityFilter);
   }
-  if (query.q) {
-    const q = String(query.q).toLowerCase().trim();
+  const qFilter = safeString(query.q, 500).toLowerCase().trim();
+  if (qFilter) {
     list = list.filter(
       t =>
-        String(t.title || '').toLowerCase().includes(q) ||
-        String(t.key || '').toLowerCase().includes(q) ||
-        String(t.desc || '').toLowerCase().includes(q),
+        String(t.title || '').toLowerCase().includes(qFilter) ||
+        String(t.key || '').toLowerCase().includes(qFilter) ||
+        String(t.desc || '').toLowerCase().includes(qFilter),
     );
   }
   return list;
@@ -461,22 +521,34 @@ export function addCommentRecord(data: any, taskId: string, text: string, byMemb
   const now = Date.now();
   const commentId = uid('c');
 
-  const cleanAttachments = rawAtts.map((a: any) => ({
-    id: a.id || uid('f'),
-    name: String(a.name || 'attachment'),
-    type: a.type || detectFileType(String(a.name || 'attachment')),
-    size: a.size || '24 KB',
-    by: a.by || author,
-    at: a.at || now,
-    project: t.project,
-    task: taskId,
-    commentId,
-    dataUrl: a.dataUrl || null,
-    textContent: a.textContent || null,
-    mime: a.mime || null,
-  }));
+  const cleanAttachments = rawAtts.map((rawA: any) => {
+    const a = stripDangerousKeys(rawA || {});
+    const safeUrl = safeDownloadUrl(a.dataUrl) || null;
+    return {
+      id: safeString(a.id, 80) || uid('f'),
+      name: safeString(a.name, 255, 'attachment') || 'attachment',
+      type: safeString(a.type, 20) || detectFileType(String(a.name || 'attachment')),
+      size: safeString(a.size, 40, '24 KB') || '24 KB',
+      by: safeString(a.by, 80) || author,
+      at: typeof a.at === 'number' ? a.at : now,
+      project: t.project,
+      task: taskId,
+      commentId,
+      dataUrl: safeUrl,
+      textContent: typeof a.textContent === 'string' ? a.textContent.slice(0, 500000) : null,
+      mime: safeString(a.mime, 100) || null,
+    };
+  });
 
-  const comment = {
+  const comment: {
+    id: string;
+    task: string;
+    by: string;
+    at: number;
+    text: string;
+    attachments: any[];
+    re: Record<string, string[]>;
+  } = {
     id: commentId,
     task: taskId,
     by: author,
@@ -536,11 +608,12 @@ export function deleteCommentRecord(data: any, commentId: string) {
 
 export function toggleCommentReaction(data: any, commentId: string, emoji: string, memberId?: string) {
   const c = (data.comments || []).find((x: any) => x.id === commentId);
-  if (!c || !emoji) return null;
-  const actor = memberId || data.me || 'm1';
+  if (!c || !isSafeEmoji(emoji)) return null;
+  const cleanEmoji = emoji.trim();
+  const actor = safeString(memberId, 80) || data.me || 'm1';
   c.re = c.re || {};
-  const list: string[] = c.re[emoji] || [];
-  c.re[emoji] = list.includes(actor) ? list.filter(x => x !== actor) : [...list, actor];
+  const list: string[] = c.re[cleanEmoji] || [];
+  c.re[cleanEmoji] = list.includes(actor) ? list.filter(x => x !== actor) : [...list, actor];
   return c;
 }
 
@@ -589,13 +662,17 @@ export function createProjectRecord(data: any, input: Record<string, any>, tmplI
   return p;
 }
 
-export function updateProjectRecord(data: any, projectId: string, patch: Record<string, any>) {
+export function updateProjectRecord(data: any, projectId: string, rawPatch: Record<string, any>) {
   const p = (data.projects || []).find((x: any) => x.id === projectId);
   if (!p) return null;
+  const patch = stripDangerousKeys(rawPatch || {});
   if (patch.status && patch.status !== p.status && (PSTAT as any)[patch.status]) {
     logActivity(data, 'changed status of project', null, `to ${(PSTAT as any)[patch.status].name}`, p.id);
   }
-  Object.assign(p, patch);
+  for (const k of Object.keys(patch)) {
+    if (!ALLOWED_PROJECT_PATCH_KEYS.has(k)) continue;
+    p[k] = patch[k];
+  }
   if (patch.lead && Array.isArray(p.members) && !p.members.includes(patch.lead)) {
     p.members.push(patch.lead);
   }
@@ -640,19 +717,20 @@ export function deleteProjectRecord(data: any, projectId: string) {
 }
 
 /* ---------- Teams ---------- */
-export function createTeamRecord(data: any, input: Record<string, any>) {
+export function createTeamRecord(data: any, rawInput: Record<string, any>) {
+  const input = stripDangerousKeys(rawInput || {});
   if (!data.teams) data.teams = TEAMS_SEED.map((t: any) => ({ ...t }));
-  const name = String(input.name || '').trim();
+  const name = safeString(input.name, 120).trim();
   if (!name) throw new Error('Give the team a name');
   if (data.teams.some((t: any) => t.name.toLowerCase() === name.toLowerCase())) {
     throw new Error(`A team called “${name}” already exists`);
   }
-  const colorHex = (PCOLORS as any)[input.color] || input.c || PCOLORS.teal;
+  const colorHex = (PCOLORS as any)[input.color] || safeCssColor(input.c, PCOLORS.teal);
   const teamObj = {
-    id: input.id || uid('tm'),
+    id: safeString(input.id, 80) || uid('tm'),
     name,
-    desc: String(input.desc || '').trim() || 'No description yet.',
-    icon: input.icon || 'users',
+    desc: safeString(input.desc, 500).trim() || 'No description yet.',
+    icon: safeString(input.icon, 40) || 'users',
     c: colorHex,
   };
   data.teams.push(teamObj);
@@ -665,15 +743,16 @@ export function createTeamRecord(data: any, input: Record<string, any>) {
   return teamObj;
 }
 
-export function updateTeamRecord(data: any, teamId: string, input: Record<string, any>) {
+export function updateTeamRecord(data: any, teamId: string, rawInput: Record<string, any>) {
+  const input = stripDangerousKeys(rawInput || {});
   if (!data.teams) data.teams = TEAMS_SEED.map((t: any) => ({ ...t }));
   const teamObj = data.teams.find((t: any) => t.id === teamId);
   if (!teamObj) return null;
-  if (input.name) teamObj.name = String(input.name).trim();
-  if (typeof input.desc === 'string') teamObj.desc = input.desc.trim();
-  if (input.icon) teamObj.icon = input.icon;
+  if (input.name) teamObj.name = safeString(input.name, 120).trim();
+  if (typeof input.desc === 'string') teamObj.desc = safeString(input.desc, 500).trim();
+  if (input.icon) teamObj.icon = safeString(input.icon, 40);
   if (input.color && (PCOLORS as any)[input.color]) teamObj.c = (PCOLORS as any)[input.color];
-  else if (input.c) teamObj.c = input.c;
+  else if (input.c) teamObj.c = safeCssColor(input.c, teamObj.c);
 
   if (Array.isArray(input.members)) {
     (data.members || []).forEach((m: any) => {
@@ -704,20 +783,22 @@ export function deleteTeamRecord(data: any, teamId: string) {
 export const EMAIL_REGEX = /^\S+@\S+\.\S+$/;
 
 export function buildInvitationEmail(data: any, member: any, baseUrl = '', projectName = '') {
-  const wsName = data.ws?.name || 'Snapsec';
+  const wsName = sanitizeHeaderValue(data.ws?.name || 'Snapsec', 100) || 'Snapsec';
   const inviter = (data.members || []).find((m: any) => m.id === (data.me || 'm1')) || {
     name: 'Mohammad Owais',
     email: 'mohammadowais616@gmail.com',
   };
-  const cleanBase = String(baseUrl || process.env.APP_URL || 'http://localhost:3000').replace(/\/+$/, '');
+  const cleanBase = sanitizeBaseUrl(baseUrl, process.env.APP_URL || 'http://localhost:3000');
   const inviteToken = member.inviteToken || uid('inv');
   member.inviteToken = inviteToken;
   const inviteUrl = `${cleanBase}/?invite=${encodeURIComponent(inviteToken)}&email=${encodeURIComponent(member.email)}`;
   member.inviteUrl = inviteUrl;
 
-  const subject = projectName
-    ? `${inviter.name} invited you to collaborate on “${projectName}” in ${wsName}`
-    : `${inviter.name} invited you to join the ${wsName} workspace`;
+  const cleanProjName = sanitizeHeaderValue(projectName, 120);
+  const inviterName = sanitizeHeaderValue(inviter.name, 100) || 'Snapsec Admin';
+  const subject = cleanProjName
+    ? `${inviterName} invited you to collaborate on “${cleanProjName}” in ${wsName}`
+    : `${inviterName} invited you to join the ${wsName} workspace`;
 
   const text = [
     `Hi ${member.name},`,
@@ -878,7 +959,7 @@ export function removeMemberRecord(data: any, memberId: string) {
 /* ---------- Files ---------- */
 export function addFileRecord(
   data: any,
-  input: {
+  rawInput: {
     id?: string;
     name: string;
     size?: string;
@@ -892,19 +973,22 @@ export function addFileRecord(
     mime?: string | null;
   },
 ) {
+  const input = stripDangerousKeys(rawInput || ({} as any));
+  const cleanName = safeString(input.name, 255, 'attachment') || 'attachment';
+  const validDataUrl = safeDownloadUrl(input.dataUrl) || null;
   const rec: any = {
-    id: input.id || uid('f'),
-    name: input.name,
-    type: input.type || detectFileType(input.name),
-    size: input.size || '120 KB',
-    by: input.by || data.me || 'm1',
+    id: safeString(input.id, 80) || uid('f'),
+    name: cleanName,
+    type: safeString(input.type, 20) || detectFileType(cleanName),
+    size: safeString(input.size, 40, '120 KB') || '120 KB',
+    by: safeString(input.by, 80) || data.me || 'm1',
     at: Date.now(),
-    project: input.project || 'p1',
-    task: input.task || null,
-    commentId: input.commentId || null,
-    dataUrl: input.dataUrl || null,
-    textContent: input.textContent || null,
-    mime: input.mime || null,
+    project: safeString(input.project, 80) || 'p1',
+    task: safeString(input.task, 80) || null,
+    commentId: safeString(input.commentId, 80) || null,
+    dataUrl: validDataUrl,
+    textContent: typeof input.textContent === 'string' ? input.textContent.slice(0, 500000) : null,
+    mime: safeString(input.mime, 100) || null,
   };
   data.files = data.files || [];
   const existingIdx = data.files.findIndex((x: any) => x.id === rec.id);
@@ -1065,11 +1149,12 @@ export function authenticateWorkspaceUser(
     }
   } else {
     if (profile.name && String(profile.name).trim()) {
-      member.name = String(profile.name).trim();
+      member.name = safeString(profile.name, 120).trim();
     }
     member.email = email;
-    if (profile.photoURL) member.photoURL = profile.photoURL;
-    if (profile.uid) member.uid = profile.uid;
+    const safePhoto = safeImageSrc(profile.photoURL);
+    if (safePhoto) member.photoURL = safePhoto;
+    if (profile.uid) member.uid = safeString(profile.uid, 128);
     member.status = 'active';
     member.last = 0;
   }

@@ -94,21 +94,27 @@ export function renderMarkdown(rawInput: string, opts: MarkdownOptions = {}): st
   const formatInline = (line: string): string => {
     let s = line;
 
-    // Images ![alt](url)
-    s = s.replace(/!\[([^\]]*)\]\(((?:https?:\/\/|data:image\/|\/)[^\s)]+)\)/g, (_, alt, url) => {
-      return hold(`<img class="md-img" src="${url}" alt="${alt}" loading="lazy">`);
-    });
+    // Images ![alt](url) — strictly allow https://, http://, /, or safe raster base64 data:image/(png|jpeg|jpg|gif|webp)
+    s = s.replace(
+      /!\[([^\]]*)\]\(((?:https?:\/\/|\/(?!\/)|data:image\/(?:png|jpeg|jpg|gif|webp);base64,)[^\s)"'<>]+)\)/gi,
+      (full, alt, url) => {
+        if (/&(quot|#39|lt|gt);/i.test(url)) return full;
+        return hold(`<img class="md-img" src="${url}" alt="${alt}" loading="lazy">`);
+      },
+    );
 
-    // Links [label](url)
-    s = s.replace(/\[([^\]]+)\]\(((?:https?:\/\/|mailto:|\/)[^\s)]+)\)/g, (_, label, url) => {
-      const ext = url.startsWith('http');
+    // Links [label](url) — strictly allow https://, http://, mailto:, or relative /path (never javascript:, data:, vbscript:, or //)
+    s = s.replace(/\[([^\]]+)\]\(((?:https?:\/\/|mailto:|\/(?!\/))[^\s)"'<>]+)\)/gi, (full, label, url) => {
+      if (/&(quot|#39|lt|gt);/i.test(url)) return full;
+      const ext = /^https?:\/\//i.test(url);
       return hold(
         `<a class="md-link" href="${url}"${ext ? ' target="_blank" rel="noopener noreferrer"' : ''}>${label}</a>`,
       );
     });
 
     // Bare URLs
-    s = s.replace(/(^|[\s(])((?:https?:\/\/)[^\s<)"']+)/g, (_, pre, url) => {
+    s = s.replace(/(^|[\s(])((?:https?:\/\/)[^\s<)"']+)/g, (full, pre, url) => {
+      if (/&(quot|#39|lt|gt);/i.test(url)) return full;
       return `${pre}${hold(`<a class="md-link" href="${url}" target="_blank" rel="noopener noreferrer">${url}</a>`)}`;
     });
 

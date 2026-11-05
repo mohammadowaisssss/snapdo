@@ -7,6 +7,7 @@ import { ic } from '../core/icons.js';
 import { seed } from '../data/seed.js';
 import { api } from '../core/api.js';
 import { applyMarkdownCommand, normalizeHtmlToMarkdown } from '../core/markdown.ts';
+import { safeDownloadUrl, safeHref } from '../core/security.ts';
 import { authorizeGmailSenderPopup, getGmailAccessToken, getGoogleSenderEmail, signInWithGooglePopup, signOutFromFirebase } from '../core/firebase.js';
 import { D, DEFAULT_PREFS, S, allTasks, applyAuthenticatedUser, canSee, commentsOf, logAct, me, mem, pColor, progressOf, proj, save, task, tasksOf, visibleProjects } from '../core/store.js';
 import { fileType, fsize } from '../ui/helpers.js';
@@ -1002,17 +1003,18 @@ A.downloadFile = el => {
   if (!f) return;
 
   const a = document.createElement('a');
-  if (f.dataUrl) {
-    a.href = f.dataUrl;
+  const validDataUrl = safeDownloadUrl(f.dataUrl);
+  if (validDataUrl) {
+    a.href = validDataUrl;
   } else if (f.textContent) {
-    const blob = new Blob([f.textContent], { type: f.mime || 'text/plain;charset=utf-8' });
+    const blob = new Blob([f.textContent], { type: 'text/plain;charset=utf-8' });
     a.href = URL.createObjectURL(blob);
   } else {
     const summary = `Snapsec Workspace File: ${f.name}\nType: ${f.type}\nSize: ${f.size || ''}\nExported at: ${new Date().toISOString()}\n`;
     const blob = new Blob([summary], { type: 'text/plain;charset=utf-8' });
     a.href = URL.createObjectURL(blob);
   }
-  a.download = f.name || 'download';
+  a.download = String(f.name || 'download').replace(/[/\\?%*:|"<>]/g, '_');
   document.body.appendChild(a);
   a.click();
   a.remove();
@@ -2044,15 +2046,19 @@ A.deliverViaGoogleOAuth = async el => {
     if (msg.deliveredToInbox) {
       toast(`Delivered directly to ${msg.to}'s Gmail inbox!`);
     } else {
-      window.open(msg.gmailComposeUrl, '_blank', 'noopener,noreferrer');
+      const composeUrl = safeHref(msg.gmailComposeUrl);
+      if (composeUrl && composeUrl.startsWith('https://mail.google.com/')) {
+        window.open(composeUrl, '_blank', 'noopener,noreferrer');
+      }
       toast(`Opened Gmail with pre-filled invitation to ${msg.to}`);
     }
   } catch (err) {
     el.classList.remove('is-loading');
     render();
     toast(err?.message || 'Could not authorize Google Mail — opening Gmail Compose instead.', { kind: 'info' });
-    if (msg.gmailComposeUrl) {
-      window.open(msg.gmailComposeUrl, '_blank', 'noopener,noreferrer');
+    const composeUrl = safeHref(msg.gmailComposeUrl);
+    if (composeUrl && composeUrl.startsWith('https://mail.google.com/')) {
+      window.open(composeUrl, '_blank', 'noopener,noreferrer');
     }
   }
 };

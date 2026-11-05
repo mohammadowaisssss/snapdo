@@ -42,18 +42,42 @@ import {
   validateAuthCredentials,
 } from './src/backend/engine.js';
 import { uid } from './src/core/utils.js';
+import {
+  isSafeSmtpTarget,
+  safeCssColor,
+  safeImageSrc,
+  safeString,
+  sanitizeBaseUrl,
+  sanitizeHeaderValue,
+  stripDangerousKeys,
+} from './src/core/security.ts';
 
 const DATA_DIR = path.resolve(process.cwd(), 'data');
 const DB_FILE = path.join(DATA_DIR, 'snapsec-db.json');
 
-let cachedEtherealAccount: nodemailer.TestAccount | null = null;
+const ALLOWED_MEMBER_PATCH_KEYS = new Set([
+  'name',
+  'email',
+  'role',
+  'team',
+  'title',
+  'c',
+  'status',
+  'tz',
+  'photoURL',
+]);
+
+let cachedEtherealAccount: any = null;
 
 function buildRawMimeEmail(outboxItem: any, fromEmail: string): string {
-  const fromName = String(outboxItem.fromName || 'Snapsec Workspace').replace(/["\r\n]/g, '');
-  const subject = `=?UTF-8?B?${Buffer.from(String(outboxItem.subject || 'Snapsec Invitation'), 'utf8').toString('base64')}?=`;
+  const fromName = sanitizeHeaderValue(outboxItem.fromName || 'Snapsec Workspace', 100).replace(/"/g, '');
+  const cleanFrom = sanitizeHeaderValue(fromEmail, 150);
+  const cleanTo = sanitizeHeaderValue(outboxItem.to, 150);
+  const cleanSubject = sanitizeHeaderValue(outboxItem.subject || 'Snapsec Invitation', 200);
+  const subject = `=?UTF-8?B?${Buffer.from(cleanSubject, 'utf8').toString('base64')}?=`;
   const lines = [
-    `From: "${fromName}" <${fromEmail}>`,
-    `To: ${outboxItem.to}`,
+    `From: "${fromName}" <${cleanFrom}>`,
+    `To: ${cleanTo}`,
     `Subject: ${subject}`,
     'MIME-Version: 1.0',
     'Content-Type: text/html; charset=UTF-8',
@@ -272,7 +296,67 @@ function saveDatabase(store: PersistedStore) {
 
 export function createApp() {
   const app = express();
+  app.disable('x-powered-by');
+
+  // 1. Security Headers Middleware (CSP, nosniff, frame-ancestors, Referrer-Policy, Permissions-Policy)
+  app.use((_req, res, next) => {
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('X-XSS-Protection', '0');
+    res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+    res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=(), payment=()');
+    res.setHeader(
+      'Content-Security-Policy',
+      [
+        "default-src 'self'",
+        "script-src 'self' 'unsafe-inline' https://apis.google.com https://*.firebaseapp.com https://*.gstatic.com",
+        "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
+        "font-src 'self' https://fonts.gstatic.com data:",
+        "img-src 'self' data: blob: https:",
+        "connect-src 'self' ws: wss: https://*.googleapis.com https://*.firebaseio.com https://*.firebaseapp.com",
+        "frame-src 'self' data: https://*.firebaseapp.com https://accounts.google.com",
+        "object-src 'none'",
+        "base-uri 'self'",
+        "form-action 'self'",
+      ].join('; '),
+    );
+    next();
+  });
+
   app.use(express.json({ limit: '15mb' }));
+
+  // 2. Global Prototype Pollution & NoSQL Operator Sanitizer Middleware
+  app.use((req, _res, next) => {
+    if (req.body && typeof req.body === 'object') {
+      req.body = stripDangerousKeys(req.body);
+    }
+    if (req.query && typeof req.query === 'object') {
+      const cleanQuery = stripDangerousKeys(req.query);
+      for (const k of Object.keys(req.query)) {
+        delete (req.query as any)[k];
+      }
+      Object.assign(req.query, cleanQuery);
+    }
+    next();
+  });
+
+  // 3. Sliding-Window Rate Limiter for sensitive Auth / Invite / SMTP endpoints
+  const rateBuckets = new Map<string, { count: number; resetAt: number }>();
+  const rateLimit = (maxRequests: number, windowMs: number) => (req: express.Request, res: express.Response, next: express.NextFunction) => {
+    if (process.env.NODE_ENV === 'test') return next();
+    const key = `${req.ip || 'local'}:${req.path}`;
+    const now = Date.now();
+    const entry = rateBuckets.get(key);
+    if (!entry || now > entry.resetAt) {
+      rateBuckets.set(key, { count: 1, resetAt: now + windowMs });
+      return next();
+    }
+    entry.count++;
+    if (entry.count > maxRequests) {
+      res.status(429).json({ error: 'Too many requests. Please wait a moment and try again.' });
+      return;
+    }
+    next();
+  };
 
   let db: PersistedStore = loadDatabase();
 
@@ -303,7 +387,7 @@ export function createApp() {
 
   // --- Full State Sync & Reset ---
   app.put('/api/state', (req, res) => {
-    const { data, prefs, views, collapsed } = req.body || {};
+    const { data, prefs, views, collapsed } = stripDangerousKeys(req.body || {});
     if (!data || !Array.isArray(data.tasks) || !Array.isArray(data.projects)) {
       res.status(400).json({ error: 'Invalid state payload: data.tasks and data.projects are required' });
       return;
@@ -652,7 +736,7 @@ export function createApp() {
     });
   });
 
-  app.post('/api/members/invite', async (req, res) => {
+  app.post('/api/members/invite', rateLimit(30, 60_000), async (req, res) => {
     try {
       const emails = Array.isArray(req.body?.emails)
         ? req.body.emails
@@ -664,19 +748,20 @@ export function createApp() {
         res.status(400).json({ error: 'Enter at least one email address' });
         return;
       }
-      const origin = req.body?.baseUrl || `${req.protocol}://${req.get('host')}`;
+      const fallbackOrigin = `${req.protocol}://${req.get('host') || 'localhost:3000'}`;
+      const origin = sanitizeBaseUrl(req.body?.baseUrl, fallbackOrigin);
       const invited = inviteMemberRecords(
         db.data,
         emails,
-        req.body?.role || 'Member',
-        req.body?.team || 'product',
+        safeString(req.body?.role, 40, 'Member') || 'Member',
+        safeString(req.body?.team, 80, 'product') || 'product',
         origin,
-        req.body?.projectName || '',
+        safeString(req.body?.projectName, 120),
       );
       const googleAccessToken =
-        req.body?.googleAccessToken ||
+        safeString(req.body?.googleAccessToken, 2048) ||
         (req.headers.authorization?.startsWith('Bearer ') ? req.headers.authorization.slice(7) : '');
-      const senderEmail = req.body?.senderEmail || '';
+      const senderEmail = sanitizeHeaderValue(req.body?.senderEmail, 150);
       const sentEmails: any[] = [];
       for (const m of invited) {
         const msg = (db.data.outbox || []).find((o: any) => o.id === m.lastInviteId);
@@ -697,25 +782,26 @@ export function createApp() {
     }
   });
 
-  app.post('/api/members/:id/resend-invite', async (req, res) => {
+  app.post('/api/members/:id/resend-invite', rateLimit(30, 60_000), async (req, res) => {
     const m = (db.data.members || []).find((x: any) => x.id === req.params.id);
     if (!m) {
       res.status(404).json({ error: 'Member not found' });
       return;
     }
-    const origin = req.body?.baseUrl || `${req.protocol}://${req.get('host')}`;
+    const fallbackOrigin = `${req.protocol}://${req.get('host') || 'localhost:3000'}`;
+    const origin = sanitizeBaseUrl(req.body?.baseUrl, fallbackOrigin);
     const googleAccessToken =
-      req.body?.googleAccessToken ||
+      safeString(req.body?.googleAccessToken, 2048) ||
       (req.headers.authorization?.startsWith('Bearer ') ? req.headers.authorization.slice(7) : '');
-    const senderEmail = req.body?.senderEmail || '';
-    const msg = buildInvitationEmail(db.data, m, origin, req.body?.projectName || '');
+    const senderEmail = sanitizeHeaderValue(req.body?.senderEmail, 150);
+    const msg = buildInvitationEmail(db.data, m, origin, safeString(req.body?.projectName, 120));
     await dispatchOutboxEmail(db, msg, { googleAccessToken, senderEmail });
     saveDatabase(db);
     res.json({ ok: true, member: m, email: msg, outbox: db.data.outbox || [], updatedAt: db.updatedAt });
   });
 
   app.post('/api/invites/accept', (req, res) => {
-    const tokenOrEmail = String(req.body?.token || req.body?.email || '').trim();
+    const tokenOrEmail = safeString(req.body?.token || req.body?.email, 200).trim();
     const member = acceptInviteTokenRecord(db.data, db.prefs, tokenOrEmail);
     if (!member) {
       res.status(404).json({ error: 'Invitation not found or expired' });
@@ -731,20 +817,25 @@ export function createApp() {
     });
   });
 
-  app.post('/api/settings/smtp', async (req, res) => {
+  app.post('/api/settings/smtp', rateLimit(15, 60_000), async (req, res) => {
     const { host, port, user, pass, from } = req.body || {};
-    const cleanHost = String(host || 'smtp.gmail.com').trim();
+    const cleanHost = safeString(host, 255, 'smtp.gmail.com').trim() || 'smtp.gmail.com';
     const cleanPort = Number(port || 465);
-    const cleanUser = String(user || '').trim();
+    const ssrfCheck = isSafeSmtpTarget(cleanHost, cleanPort);
+    if (!ssrfCheck.ok) {
+      res.status(400).json({ error: ssrfCheck.reason || 'Invalid SMTP target' });
+      return;
+    }
+    const cleanUser = sanitizeHeaderValue(user, 150);
     const cleanPass = cleanHost.includes('gmail.com')
-      ? String(pass || '').replace(/\s+/g, '')
-      : String(pass || '').trim();
+      ? safeString(pass, 255).replace(/\s+/g, '')
+      : safeString(pass, 255).trim();
     db.data.smtpConfig = {
       host: cleanHost,
       port: cleanPort,
       user: cleanUser,
       pass: cleanPass,
-      from: String(from || cleanUser).trim(),
+      from: sanitizeHeaderValue(from || cleanUser, 150),
     };
     saveDatabase(db);
 
@@ -778,10 +869,21 @@ export function createApp() {
       res.status(404).json({ error: 'Member not found' });
       return;
     }
-    Object.assign(m, req.body || {});
+    const patch = stripDangerousKeys(req.body || {});
+    for (const k of Object.keys(patch)) {
+      if (!ALLOWED_MEMBER_PATCH_KEYS.has(k)) continue;
+      if (k === 'photoURL') {
+        const safePhoto = safeImageSrc(patch.photoURL);
+        m.photoURL = safePhoto || '';
+      } else if (k === 'c') {
+        m.c = safeCssColor(patch.c, m.c || '#5A67D8');
+      } else {
+        m[k] = safeString(patch[k], 200);
+      }
+    }
     if (m.id === db.data.me) {
-      if (req.body?.name) db.prefs.name = req.body.name;
-      if (req.body?.title) db.prefs.title = req.body.title;
+      if (patch.name) db.prefs.name = m.name;
+      if (patch.title) db.prefs.title = m.title;
     }
     saveDatabase(db);
     res.json({ member: m, updatedAt: db.updatedAt });
@@ -800,8 +902,10 @@ export function createApp() {
   // --- Files API ---
   app.get('/api/files', (req, res) => {
     let files = [...(db.data.files || [])];
-    if (req.query.project) files = files.filter((f: any) => f.project === req.query.project);
-    if (req.query.type && req.query.type !== 'all') files = files.filter((f: any) => f.type === req.query.type);
+    const projFilter = safeString(req.query.project, 80);
+    const typeFilter = safeString(req.query.type, 40);
+    if (projFilter) files = files.filter((f: any) => f.project === projFilter);
+    if (typeFilter && typeFilter !== 'all') files = files.filter((f: any) => f.type === typeFilter);
     res.json({ files });
   });
 
@@ -1054,24 +1158,29 @@ export function createApp() {
 
 async function startServer() {
   const app = createApp();
-  const PORT = 3000;
+  const PORT = Number(process.env.PORT || 3000);
+  const apiOnly = process.env.API_ONLY === 'true';
 
-  if (process.env.NODE_ENV !== 'production') {
-    const vite = await createViteServer({
-      server: { middlewareMode: true },
-      appType: 'spa',
-    });
-    app.use(vite.middlewares);
-  } else {
-    const distPath = path.join(process.cwd(), 'dist');
-    app.use(express.static(distPath));
-    app.get('*', (_req, res) => {
-      res.sendFile(path.join(distPath, 'index.html'));
-    });
+  if (!apiOnly) {
+    if (process.env.NODE_ENV !== 'production') {
+      const vite = await createViteServer({
+        server: { middlewareMode: true },
+        appType: 'spa',
+      });
+      app.use(vite.middlewares);
+    } else {
+      const distPath = path.join(process.cwd(), 'dist');
+      if (fs.existsSync(distPath)) {
+        app.use(express.static(distPath));
+        app.get('*', (_req, res) => {
+          res.sendFile(path.join(distPath, 'index.html'));
+        });
+      }
+    }
   }
 
   app.listen(PORT, '0.0.0.0', () => {
-    console.log(`Snapsec TaskTracker server running on http://localhost:${PORT}`);
+    console.log(`Snapsec TaskTracker ${apiOnly ? 'API ' : ''}server running on http://localhost:${PORT}`);
   });
 }
 

@@ -6,6 +6,7 @@ import { ic } from '../core/icons.js';
 import { D, S, commentsOf, isOver, mem, pColor, proj, task } from '../core/store.js';
 import { FT, av, filePrev, fileType, fmtComment, lbl, md, mdToolbar, progBar } from '../ui/helpers.js';
 import { normalizeHtmlToMarkdown } from '../core/markdown.ts';
+import { safeImageSrc } from '../core/security.ts';
 import { fxc } from '../shell/render.js';
 import { cellAssignee, cellDue, cellPrio, cellProject, cellStatus } from '../components/task-list.js';
 import { modalHtml } from './modals.js';
@@ -51,7 +52,7 @@ export function drawerHtml(t) {
   return `<aside class="drawer ${u.drawerFull ? 'full' : ''} ${u.fx.drawer ? 'enter' : ''} ${u.fx.tabs ? 'fx-tabs' : ''}" role="dialog" aria-modal="${u.drawerFull}" aria-labelledby="d-h" tabindex="-1">
     <h2 class="sr" id="d-h">${sub ? 'Subtask: ' + esc(sub.title) : 'Task: ' + esc(t.title)}</h2>
     <div class="drawer-h">
-      <button class="pillbtn" data-a="go" data-r="project" data-id="${p.id}" data-tab="board" style="font-size:12.5px"><span class="pdot" style="--c:${pColor(p)}"></span>${esc(p.name)}</button><span class="faint">/</span><span class="mono faint" style="font-size:11.5px;padding:0 6px">${t.key}</span>
+      <button class="pillbtn" data-a="go" data-r="project" data-id="${esc(p.id)}" data-tab="board" style="font-size:12.5px"><span class="pdot" style="--c:${pColor(p)}"></span>${esc(p.name)}</button><span class="faint">/</span><span class="mono faint" style="font-size:11.5px;padding:0 6px">${esc(t.key)}</span>
       <span class="sp"></span>
       <button class="btn btn-sm ${t.status === 'done' ? 'btn-secondary' : 'btn-ghost'}" data-a="toggleDone" data-id="${t.id}" style="${t.status === 'done' ? 'color:var(--green)' : ''}">${ic(t.status === 'done' ? 'circle-check' : 'circle', 14)}<span class="hide-m">${t.status === 'done' ? 'Completed' : 'Mark complete'}</span></button>
       <button class="ibtn ibtn-sm" data-a="toggleFavTask" data-id="${t.id}" data-tip="${t.fav ? 'Unfavorite' : 'Favorite'}" aria-pressed="${t.fav}" aria-label="Favorite" style="${t.fav ? 'color:var(--amber)' : ''}">${ic('star', 15)}</button>
@@ -100,7 +101,7 @@ export function drawerHtml(t) {
 
       <div class="dsec"><div class="dsec-h"><h3>Attachments</h3><span class="cnt">${t.attachments.length}</span><div class="acts"><label class="btn btn-sm btn-ghost" style="cursor:pointer">${ic('upload', 13)}Upload<input type="file" multiple hidden data-in="uploadFiles" data-task="${t.id}" data-project="${t.project}"></label></div></div>
         ${ups.map(x => `<div class="upl" style="margin-bottom:6px"><span class="ftype" style="--c:${FT[fileType(x.name)].c}">${ic(FT[fileType(x.name)].i, 14)}</span><div class="grow"><div class="row"><span class="trunc">${esc(x.name)}</span><span class="sp"></span><span class="faint num" id="upct-${x.id}" style="font-size:11px">${x.pct}%</span></div><div class="prog" style="margin-top:5px"><i id="upbar-${x.id}" style="width:${x.pct}%"></i></div></div></div>`).join('')}
-        ${t.attachments.length ? `<div class="att">${t.attachments.map(f => `<div class="attc" data-a="filePreview" data-tid="${t.id}" data-aid="${f.id}" role="button" tabindex="0">${filePrev(f)}<div class="fi"><div class="trunc" style="font-weight:500">${esc(f.name)}</div><div class="faint">${FT[f.type]?.n || 'File'} · ${f.size}</div></div><button class="ibtn ibtn-xs x" data-a="rmAttach" data-id="${t.id}" data-aid="${f.id}" aria-label="Remove attachment">${ic('x', 12)}</button></div>`).join('')}</div>` : !ups.length ? `<label class="dropzone" style="padding:12px" data-dropzone-task="${t.id}">${ic('paperclip', 15)}<span>Drop files or click to attach</span><input type="file" multiple hidden data-in="uploadFiles" data-task="${t.id}" data-project="${t.project}"></label>` : ''}
+        ${t.attachments.length ? `<div class="att">${t.attachments.map(f => `<div class="attc" data-a="filePreview" data-tid="${esc(t.id)}" data-aid="${esc(f.id)}" role="button" tabindex="0">${filePrev(f)}<div class="fi"><div class="trunc" style="font-weight:500">${esc(f.name)}</div><div class="faint">${FT[f.type]?.n || 'File'} · ${esc(f.size || '')}</div></div><button class="ibtn ibtn-xs x" data-a="rmAttach" data-id="${esc(t.id)}" data-aid="${esc(f.id)}" aria-label="Remove attachment">${ic('x', 12)}</button></div>`).join('')}</div>` : !ups.length ? `<label class="dropzone" style="padding:12px" data-dropzone-task="${esc(t.id)}">${ic('paperclip', 15)}<span>Drop files or click to attach</span><input type="file" multiple hidden data-in="uploadFiles" data-task="${esc(t.id)}" data-project="${esc(t.project)}"></label>` : ''}
       </div>
 
       <div class="dsec">
@@ -129,12 +130,14 @@ export function drawerHtml(t) {
               (u.commentFiles?.[t.id] || []).length
                 ? `<div class="row" style="flex-wrap:wrap;gap:6px;padding:6px 10px;border-top:1px dashed var(--border);background:var(--surface-2)">${(u.commentFiles[t.id] || [])
                     .map(
-                      (cf, idx) =>
-                        `<div class="row" style="gap:6px;padding:4px 8px;border-radius:6px;border:1px solid var(--border);background:var(--surface);font-size:12px;max-width:240px;cursor:pointer" data-a="previewStagedCommentFile" data-tid="${t.id}" data-i="${idx}" title="Click to preview ${esc(cf.name)}">${
-                          cf.dataUrl && cf.type === 'img'
-                            ? `<img src="${esc(cf.dataUrl)}" alt="${esc(cf.name)}" style="width:22px;height:22px;object-fit:cover;border-radius:4px;flex-shrink:0">`
+                      (cf, idx) => {
+                        const safeCfImg = safeImageSrc(cf.dataUrl);
+                        return `<div class="row" style="gap:6px;padding:4px 8px;border-radius:6px;border:1px solid var(--border);background:var(--surface);font-size:12px;max-width:240px;cursor:pointer" data-a="previewStagedCommentFile" data-tid="${esc(t.id)}" data-i="${idx}" title="Click to preview ${esc(cf.name)}">${
+                          safeCfImg && cf.type === 'img'
+                            ? `<img src="${esc(safeCfImg)}" alt="${esc(cf.name)}" style="width:22px;height:22px;object-fit:cover;border-radius:4px;flex-shrink:0">`
                             : `<span class="ftype" style="--c:${(FT[cf.type] || FT.other).c};width:20px;height:20px">${ic((FT[cf.type] || FT.other).i, 11)}</span>`
-                        }<span class="trunc" style="font-weight:500">${esc(cf.name)}</span><span class="faint" style="font-size:11px;flex-shrink:0">${esc(cf.size)}</span><button type="button" class="ibtn ibtn-xs" data-a="rmCommentDraftFile" data-id="${t.id}" data-i="${idx}" aria-label="Remove staged file">${ic('x', 11)}</button></div>`,
+                        }<span class="trunc" style="font-weight:500">${esc(cf.name)}</span><span class="faint" style="font-size:11px;flex-shrink:0">${esc(cf.size)}</span><button type="button" class="ibtn ibtn-xs" data-a="rmCommentDraftFile" data-id="${esc(t.id)}" data-i="${idx}" aria-label="Remove staged file">${ic('x', 11)}</button></div>`;
+                      },
                     )
                     .join('')}</div>`
                 : ''
@@ -161,13 +164,14 @@ export function commentHtml(c) {
         ? `<div class="cmt-atts" style="display:flex;flex-wrap:wrap;gap:8px;margin-top:8px">${atts
             .map(a => {
               const ft = FT[a.type] || FT.other;
-              if (a.dataUrl && (a.type === 'img' || String(a.dataUrl).startsWith('data:image/'))) {
-                return `<div class="cmt-att-img" data-a="previewCommentFile" data-cid="${c.id}" data-aid="${a.id}" role="button" tabindex="0" style="cursor:pointer;border:1px solid var(--border);border-radius:8px;overflow:hidden;background:var(--surface-2);max-width:220px">
-                  <img src="${esc(a.dataUrl)}" alt="${esc(a.name)}" style="display:block;width:100%;max-height:140px;object-fit:cover">
+              const safeImg = safeImageSrc(a.dataUrl);
+              if (safeImg && (a.type === 'img' || String(a.dataUrl).startsWith('data:image/'))) {
+                return `<div class="cmt-att-img" data-a="previewCommentFile" data-cid="${esc(c.id)}" data-aid="${esc(a.id)}" role="button" tabindex="0" style="cursor:pointer;border:1px solid var(--border);border-radius:8px;overflow:hidden;background:var(--surface-2);max-width:220px">
+                  <img src="${esc(safeImg)}" alt="${esc(a.name)}" style="display:block;width:100%;max-height:140px;object-fit:cover">
                   <div class="row" style="padding:5px 8px;gap:6px;font-size:11.5px;background:var(--surface)"><span class="trunc" style="font-weight:500">${esc(a.name)}</span><span class="sp"></span><span class="faint">${esc(a.size || '')}</span></div>
                 </div>`;
               }
-              return `<div class="row" data-a="previewCommentFile" data-cid="${c.id}" data-aid="${a.id}" role="button" tabindex="0" style="cursor:pointer;gap:8px;padding:6px 10px;border:1px solid var(--border);border-radius:8px;background:var(--surface-2);font-size:12.5px;max-width:260px">
+              return `<div class="row" data-a="previewCommentFile" data-cid="${esc(c.id)}" data-aid="${esc(a.id)}" role="button" tabindex="0" style="cursor:pointer;gap:8px;padding:6px 10px;border:1px solid var(--border);border-radius:8px;background:var(--surface-2);font-size:12.5px;max-width:260px">
                 <span class="ftype" style="--c:${ft.c};width:24px;height:24px;flex-shrink:0">${ic(ft.i, 13)}</span>
                 <div class="grow" style="min-width:0"><div class="trunc" style="font-weight:500">${esc(a.name)}</div><div class="faint" style="font-size:11px">${ft.n} · ${esc(a.size || '')}</div></div>
               </div>`;
@@ -176,12 +180,12 @@ export function commentHtml(c) {
         : ''
     }
     <div class="reacts">${Object.entries(c.re || {})
-      .filter(([, v]) => v.length)
+      .filter(([, v]) => Array.isArray(v) && v.length)
       .map(
         ([e, v]) =>
-          `<button class="react ${v.includes(D().me) ? 'mine' : ''}" data-a="react" data-id="${c.id}" data-e="${e}" aria-label="${e} ${v.length}" title="${v.map(i => mem(i)?.name).join(', ')}">${e}<span class="num">${v.length}</span></button>`,
+          `<button class="react ${v.includes(D().me) ? 'mine' : ''}" data-a="react" data-id="${esc(c.id)}" data-e="${esc(e)}" aria-label="${esc(e)} ${v.length}" title="${esc(v.map(i => mem(i)?.name || '').join(', '))}">${esc(e)}<span class="num">${v.length}</span></button>`,
       )
       .join(
         '',
-      )}<button class="react" data-a="pop" data-pop="emoji" data-id="${c.id}" aria-label="Add reaction" style="color:var(--text-3)">${ic('smile-plus', 13)}</button></div></div></div>`;
+      )}<button class="react" data-a="pop" data-pop="emoji" data-id="${esc(c.id)}" aria-label="Add reaction" style="color:var(--text-3)">${ic('smile-plus', 13)}</button></div></div></div>`;
 }

@@ -1,0 +1,56 @@
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    container_name: snapsec-tasktracker-backend
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      API_ONLY: "true"
+      PORT: 4000
+      APP_URL: ${APP_URL:-http://localhost:3000}
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-465}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASS: ${SMTP_PASS:-}
+    ports:
+      - "4000:4000"
+    volumes:
+      - snapsec_data:/app/data
+    networks:
+      - snapsec_net
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:4000/api/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  ui:
+    build:
+      context: .
+      dockerfile: Dockerfile.ui
+    container_name: snapsec-tasktracker-ui
+    restart: unless-stopped
+    ports:
+      - "3000:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+    networks:
+      - snapsec_net
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:80/"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+
+volumes:
+  snapsec_data:
+    driver: local
+
+networks:
+  snapsec_net:
+    driver: bridge

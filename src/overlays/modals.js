@@ -5,6 +5,7 @@ import { PCOLORS, PICONS } from '../core/constants.js';
 import { D, S, mem, pColor, proj, task, teamsList } from '../core/store.js';
 import { FT, av, fileFullPreview, filePrev, lbl, md, mdToolbar, prPill, stPill } from '../ui/helpers.js';
 import { getGmailAccessToken, getGoogleSenderEmail } from '../core/firebase.js';
+import { safeHref } from '../core/security.ts';
 import { focusKey, render } from '../shell/render.js';
 import { teamModal } from '../features/teams.js';
 
@@ -70,9 +71,9 @@ export function taskModal(m, H) {
   const p = proj(f.project);
   const err = S.ui.errors.title;
   const descPrev = !!(S.ui.mdPrev && S.ui.mdPrev['form:desc']);
-  return `${H(m.edit ? 'Edit task' : 'New task', m.edit ? `<span class="mono">${task(m.edit)?.key}</span>` : '')}
+  return `${H(m.edit ? 'Edit task' : 'New task', m.edit ? `<span class="mono">${esc(task(m.edit)?.key || '')}</span>` : '')}
   <form class="modal-b" data-submit="submitTask" style="gap:12px">
-    <div class="field"><label class="sr" for="f-title">Task name</label><input class="input input-lg ${err ? 'is-error' : ''}" id="f-title" data-in="form" data-f="title" value="${esc(f.title)}" placeholder="Task name" autofocus aria-invalid="${!!err}" aria-describedby="f-title-err" style="font-size:15px;font-weight:500">${err ? `<span class="err" id="f-title-err">${ic('circle-alert', 12)}${err}</span>` : ''}</div>
+    <div class="field"><label class="sr" for="f-title">Task name</label><input class="input input-lg ${err ? 'is-error' : ''}" id="f-title" data-in="form" data-f="title" value="${esc(f.title)}" placeholder="Task name" autofocus aria-invalid="${!!err}" aria-describedby="f-title-err" style="font-size:15px;font-weight:500">${err ? `<span class="err" id="f-title-err">${ic('circle-alert', 12)}${esc(err)}</span>` : ''}</div>
     <div class="field">
       <div class="row" style="justify-content:space-between;margin-bottom:4px">
         <label class="label" for="f-desc" style="margin:0">Description <span class="faint" style="font-weight:400">(Markdown supported)</span></label>
@@ -98,7 +99,7 @@ export function taskModal(m, H) {
       ${f.subtasks.map((s, i) => `<div class="subt" style="padding:0 4px">${ic('circle', 13)}<span class="s">${esc(s.title)}</span><button type="button" class="ibtn ibtn-xs x" style="opacity:1" data-a="formRmSub" data-i="${i}" aria-label="Remove">${ic('x', 12)}</button></div>`).join('')}
       <div class="inwrap">${ic('plus', 14)}<input class="input" id="f-sub" data-key-enter="formAddSub" placeholder="Add a subtask and press Enter"></div></div>
     <div class="field"><span class="label">Attachments</span>
-      ${f.files.length ? `<div class="col" style="gap:4px">${f.files.map((x, i) => `<div class="upl" style="padding:6px 10px"><span class="ftype" style="--c:${FT[x.type].c};width:22px;height:22px">${ic(FT[x.type].i, 12)}</span><span class="grow trunc">${esc(x.name)}</span><span class="faint" style="font-size:11.5px">${x.size}</span><button type="button" class="ibtn ibtn-xs" data-a="formRmFile" data-i="${i}" aria-label="Remove">${ic('x', 12)}</button></div>`).join('')}</div>` : ''}
+      ${f.files.length ? `<div class="col" style="gap:4px">${f.files.map((x, i) => `<div class="upl" style="padding:6px 10px"><span class="ftype" style="--c:${FT[x.type]?.c || '#6B7280'};width:22px;height:22px">${ic(FT[x.type]?.i || 'file', 12)}</span><span class="grow trunc">${esc(x.name)}</span><span class="faint" style="font-size:11.5px">${esc(x.size)}</span><button type="button" class="ibtn ibtn-xs" data-a="formRmFile" data-i="${i}" aria-label="Remove">${ic('x', 12)}</button></div>`).join('')}</div>` : ''}
       <label class="dropzone" style="padding:10px">${ic('paperclip', 14)}<span>Attach files or paste with ${MOD}+V</span><input type="file" multiple hidden data-in="formFiles"></label></div>
   </form>
   <div class="modal-f">${m.edit ? '' : `<label class="row" style="gap:8px;font-size:12.5px;color:var(--text-2);cursor:pointer"><input type="checkbox" class="toggle" id="f-more" data-in="formMore" ${f.more ? 'checked' : ''}>Create more</label>`}<span class="sp"></span>
@@ -184,13 +185,13 @@ export function projectModal(m, H) {
     </div>
     <div class="row" style="gap:12px;flex-wrap:wrap">
       <div class="field" style="flex:1;min-width:150px"><label class="label" for="p-team">Team</label><select class="select" id="p-team" data-in="pform" data-f="team">${teamsList()
-        .map(t => `<option value="${t.id}" ${f.team === t.id ? 'selected' : ''}>${t.name}</option>`)
+        .map(t => `<option value="${esc(t.id)}" ${f.team === t.id ? 'selected' : ''}>${esc(t.name)}</option>`)
         .join('')}</select></div>
       <div class="field" style="flex:1;min-width:150px"><label class="label" for="p-lead">Lead</label><select class="select" id="p-lead" data-in="pform" data-f="lead">${D()
         .members.filter(x => x.status === 'active')
-        .map(x => `<option value="${x.id}" ${f.lead === x.id ? 'selected' : ''}>${esc(x.name)}</option>`)
+        .map(x => `<option value="${esc(x.id)}" ${f.lead === x.id ? 'selected' : ''}>${esc(x.name)}</option>`)
         .join('')}</select></div>
-      <div class="field" style="flex:1;min-width:150px"><label class="label" for="p-due">Target date</label><input type="date" class="input" id="p-due" data-in="pform" data-f="due" value="${f.due || ''}"></div>
+      <div class="field" style="flex:1;min-width:150px"><label class="label" for="p-due">Target date</label><input type="date" class="input" id="p-due" data-in="pform" data-f="due" value="${esc(f.due || '')}"></div>
     </div>
     ${m.edit ? '' : `<div class="field"><span class="label">Template</span><div class="tmpls" role="radiogroup">${TEMPLATES.map(t => `<button type="button" role="radio" aria-checked="${f.tmpl === t.id}" class="opt ${f.tmpl === t.id ? 'on' : ''}" data-a="pformSet" data-f="tmpl" data-v="${t.id}" style="padding:10px">${ic(t.icon, 16)}<b style="font-size:12.5px">${t.name}</b><span>${t.tasks.length ? t.tasks.length + ' starter tasks' : t.desc}</span></button>`).join('')}</div></div>`}
   </form>
@@ -283,10 +284,10 @@ export function inviteModal(m, H) {
       <button type="button" class="btn btn-xs btn-secondary" data-a="toggleSmtpForm">${ic('settings', 12)}SMTP</button>
     </div>
     ${S.ui.showSmtpForm ? smtpConfigFormHtml() : ''}
-    <div class="field"><label class="label" for="inv-emails">Email addresses</label><textarea class="textarea ${err ? 'is-error' : ''}" id="inv-emails" placeholder="name@company.com, another@company.com" rows="3" autofocus>${esc(S.ui.inviteDraft || '')}</textarea>${err ? `<span class="err">${ic('circle-alert', 12)}${err}</span>` : '<span class="hint">Separate multiple addresses with commas.</span>'}</div>
+    <div class="field"><label class="label" for="inv-emails">Email addresses</label><textarea class="textarea ${err ? 'is-error' : ''}" id="inv-emails" placeholder="name@company.com, another@company.com" rows="3" autofocus>${esc(S.ui.inviteDraft || '')}</textarea>${err ? `<span class="err">${ic('circle-alert', 12)}${esc(err)}</span>` : '<span class="hint">Separate multiple addresses with commas.</span>'}</div>
     <div class="row" style="gap:12px"><div class="field grow"><label class="label" for="inv-role">Role</label><select class="select" id="inv-role">${['Member', 'Admin', 'Guest'].map(r => `<option>${r}</option>`).join('')}</select></div>
     <div class="field grow"><label class="label" for="inv-team">Team</label><select class="select" id="inv-team">${teamsList()
-      .map(t => `<option value="${t.id}">${t.name}</option>`)
+      .map(t => `<option value="${esc(t.id)}">${esc(t.name)}</option>`)
       .join('')}</select></div></div>
     <div class="alert info">${ic('info', 14)}<span><b>Guests</b> can only see projects they're added to and can't create projects.</span></div>
     ${
@@ -294,7 +295,7 @@ export function inviteModal(m, H) {
         ? `<div style="border-top:1px solid var(--divider);padding-top:10px"><div class="eyebrow" style="margin-bottom:6px">Recent invitations sent</div><div class="col" style="gap:6px">${outbox
             .map(
               msg =>
-                `<div class="row" style="padding:6px 10px;border:1px solid var(--border);border-radius:7px;background:var(--surface-2);font-size:12px;gap:8px"><span class="badge ${msg.deliveredToInbox ? 'green' : 'amber'}"><span class="dot"></span>${msg.deliveredToInbox ? 'Delivered' : 'Ready'}</span><span class="grow trunc"><b>${esc(msg.to)}</b> · ${esc(msg.role)}</span><button type="button" class="btn btn-xs btn-secondary" data-a="previewInviteEmail" data-id="${msg.id}">${ic('mail', 12)}View email</button><a class="btn btn-xs btn-ghost" href="${esc(msg.gmailComposeUrl)}" target="_blank" rel="noopener noreferrer">${ic('external-link', 12)}Gmail</a></div>`,
+                `<div class="row" style="padding:6px 10px;border:1px solid var(--border);border-radius:7px;background:var(--surface-2);font-size:12px;gap:8px"><span class="badge ${msg.deliveredToInbox ? 'green' : 'amber'}"><span class="dot"></span>${msg.deliveredToInbox ? 'Delivered' : 'Ready'}</span><span class="grow trunc"><b>${esc(msg.to)}</b> · ${esc(msg.role)}</span><button type="button" class="btn btn-xs btn-secondary" data-a="previewInviteEmail" data-id="${esc(msg.id)}">${ic('mail', 12)}View email</button><a class="btn btn-xs btn-ghost" href="${esc(safeHref(msg.gmailComposeUrl))}" target="_blank" rel="noopener noreferrer">${ic('external-link', 12)}Gmail</a></div>`,
             )
             .join('')}</div></div>`
         : ''
@@ -361,15 +362,42 @@ export function filePreviewModal(m, H) {
   const f = m.file;
   if (!f) return `${H('File not found')}<div class="modal-b"><p class="muted">This file may have been deleted.</p></div><div class="modal-f"><button class="btn btn-primary" data-a="closeModal">Close</button></div>`;
   const t = FT[f.type] || FT.other;
-  return `${H(esc(f.name), `${t.n} · ${f.size || ''} · Uploaded by ${esc(mem(f.by)?.name || 'you')} ${ago(f.at)}`)}
+  return `${H(esc(f.name), `${t.n} · ${esc(f.size || '')} · Uploaded by ${esc(mem(f.by)?.name || 'you')} ${ago(f.at)}`)}
   <div class="modal-b"><div style="border:1px solid var(--border);border-radius:var(--r-lg);overflow:hidden">${fileFullPreview(f)}</div>
-  ${m.tid && task(m.tid) ? `<div class="row faint" style="font-size:12.5px">${ic('link', 13)}Attached to <button class="link" data-a="openTask" data-id="${m.tid}">${esc(task(m.tid)?.title)}</button></div>` : ''}</div>
-  <div class="modal-f"><button class="btn btn-secondary" data-a="downloadFile" data-fid="${f.id}" data-tid="${m.tid || ''}">${ic('download', 14)}Download</button><button class="btn btn-secondary" data-a="copyLink" data-fid="${f.id}">${ic('link', 14)}Copy link</button><span class="sp"></span><button class="btn btn-primary" data-a="closeModal">Close</button></div>`;
+  ${m.tid && task(m.tid) ? `<div class="row faint" style="font-size:12.5px">${ic('link', 13)}Attached to <button class="link" data-a="openTask" data-id="${esc(m.tid)}">${esc(task(m.tid)?.title)}</button></div>` : ''}</div>
+  <div class="modal-f"><button class="btn btn-secondary" data-a="downloadFile" data-fid="${esc(f.id)}" data-tid="${esc(m.tid || '')}">${ic('download', 14)}Download</button><button class="btn btn-secondary" data-a="copyLink" data-fid="${esc(f.id)}">${ic('link', 14)}Copy link</button><span class="sp"></span><button class="btn btn-primary" data-a="closeModal">Close</button></div>`;
+}
+export function renderSafeEmailCard(msg) {
+  const wsName = D()?.ws?.name || 'Snapsec';
+  const fromName = msg.fromName || 'Mohammad Owais';
+  const fromEmail = msg.from || 'mohammadowais616@gmail.com';
+  const toName = msg.toName || msg.to || 'Teammate';
+  const role = msg.role || 'Member';
+  const inviteUrl = safeHref(msg.inviteUrl) || '#';
+  const projectPart = msg.projectName ? ` on project <strong>${esc(msg.projectName)}</strong>` : '';
+  return `<div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;max-width:560px;margin:0 auto;padding:28px;background:#ffffff;border:1px solid #e5e7eb;border-radius:12px;color:#111827">
+    <div style="margin-bottom:20px">
+      <img src="https://suite.snapsec.co/media/logos/snapsec.svg" alt="Snapsec" style="height:28px;width:auto;display:block" />
+    </div>
+    <h2 style="font-size:20px;font-weight:600;margin:0 0 12px;color:#111827">${esc(fromName)} invited you to join ${esc(wsName)}</h2>
+    <p style="font-size:14px;line-height:1.6;color:#374151;margin:0 0 16px">
+      Hi <strong>${esc(toName)}</strong>, <strong>${esc(fromName)}</strong> (${esc(fromEmail)}) has invited you to collaborate in the <strong>${esc(wsName)}</strong> workspace${projectPart} with the <strong>${esc(role)}</strong> role.
+    </p>
+    <div style="margin:24px 0">
+      <a href="${esc(inviteUrl)}" target="_blank" rel="noopener noreferrer" style="display:inline-block;background:#4F46E5;color:#ffffff;font-weight:600;font-size:14px;padding:11px 22px;border-radius:8px;text-decoration:none">Accept invitation &amp; join ${esc(wsName)}</a>
+    </div>
+    <p style="font-size:12.5px;line-height:1.5;color:#6B7280;margin:0 0 8px">Or copy and paste this direct join link into your browser:</p>
+    <div style="font-family:monospace;font-size:12px;padding:10px 12px;background:#F3F4F6;border-radius:6px;word-break:break-all;color:#1F2937">${esc(inviteUrl)}</div>
+    <hr style="border:none;border-top:1px solid #E5E7EB;margin:24px 0 12px" />
+    <div style="font-size:11.5px;color:#9CA3AF">Sent by ${esc(wsName)} TaskTracker · Security &amp; Engineering Workspace</div>
+  </div>`;
 }
 export function emailPreviewModal(m, H) {
   const msg = m.email || (D().outbox || []).find(x => x.id === m.id);
   if (!msg) return `${H('Invitation email')}<div class="modal-b"><p class="muted">Invitation details not found.</p></div><div class="modal-f"><button class="btn btn-primary" data-a="closeModal">Close</button></div>`;
   const realInbox = !!msg.deliveredToInbox;
+  const safePreview = safeHref(msg.previewUrl);
+  const safeGmail = safeHref(msg.gmailComposeUrl);
   return `${H(realInbox ? 'Invitation delivered to Gmail inbox' : 'Invitation email ready for Gmail delivery', `To: ${esc(msg.to)} · Role: ${esc(msg.role)} · ${ago(msg.sentAt)}`)}
   <div class="modal-b" style="gap:12px">
     ${
@@ -389,7 +417,7 @@ export function emailPreviewModal(m, H) {
               <div class="row" style="gap:8px;margin-top:9px;flex-wrap:wrap">
                 <button type="button" class="btn btn-xs btn-primary" data-a="deliverViaGoogleOAuth" data-id="${esc(msg.id)}" id="deliver-oauth-btn">${ic('send', 12)}Deliver Now via My Google Account</button>
                 <button type="button" class="btn btn-xs btn-secondary" data-a="toggleSmtpForm">${ic('settings', 12)}Configure Gmail App Password / SMTP</button>
-                ${msg.previewUrl ? `<a class="btn btn-xs btn-ghost" href="${esc(msg.previewUrl)}" target="_blank" rel="noopener noreferrer">${ic('external-link', 12)}Sandbox Preview</a>` : ''}
+                ${safePreview ? `<a class="btn btn-xs btn-ghost" href="${esc(safePreview)}" target="_blank" rel="noopener noreferrer">${ic('external-link', 12)}Sandbox Preview</a>` : ''}
               </div>
             </div>
           </div>`
@@ -401,12 +429,12 @@ export function emailPreviewModal(m, H) {
         <div><b>To:</b> ${esc(msg.to)}</div>
         <div><b>Subject:</b> ${esc(msg.subject)}</div>
       </div>
-      ${msg.html}
+      ${renderSafeEmailCard(msg)}
     </div>
   </div>
   <div class="modal-f" style="flex-wrap:wrap;gap:8px">
     <button class="btn btn-primary" data-a="deliverViaGoogleOAuth" data-id="${esc(msg.id)}">${ic('send', 14)}Send via Google Account</button>
-    <a class="btn btn-secondary" href="${esc(msg.gmailComposeUrl)}" target="_blank" rel="noopener noreferrer">${ic('mail', 14)}Open in Gmail Compose</a>
+    <a class="btn btn-secondary" href="${esc(safeGmail || '#')}" target="_blank" rel="noopener noreferrer">${ic('mail', 14)}Open in Gmail Compose</a>
     <button class="btn btn-secondary" data-a="copyText" data-text="${esc(msg.inviteUrl)}">${ic('link', 14)}Copy join link</button>
     <button class="btn btn-secondary" data-a="acceptInviteNow" data-token="${esc(msg.inviteToken)}">${ic('user-check', 14)}Test Join Link</button>
     <span class="sp"></span>
