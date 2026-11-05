@@ -55,21 +55,35 @@ function lucideSubset() {
 }
 
 export default defineConfig(() => {
+  const rootDir = typeof import.meta.dirname === 'string' ? import.meta.dirname : path.resolve();
   return {
+    base: '/',
     plugins: [lucideSubset()],
     resolve: {
       alias: {
-        '@': path.resolve(__dirname, '.'),
+        '@': rootDir,
       },
+    },
+    build: {
+      outDir: 'dist',
+      assetsDir: 'assets',
+      chunkSizeWarningLimit: 1500,
     },
     server: {
       port: 3000,
       host: '0.0.0.0',
+      allowedHosts: true as const,
       // HMR is disabled in AI Studio via DISABLE_HMR env var.
       // Do not modify—file watching is disabled to prevent flickering during agent edits.
       hmr: process.env.DISABLE_HMR !== 'true',
       // Disable file watching when DISABLE_HMR is true to save CPU during agent edits.
       watch: process.env.DISABLE_HMR === 'true' ? null : {},
     },
+    preview: {
+      port: 3000,
+      host: '0.0.0.0',
+      allowedHosts: true as const,
+    },
   };
 });
+

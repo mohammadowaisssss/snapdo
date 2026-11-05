@@ -13,9 +13,13 @@ COPY package.json package-lock.json* ./
 RUN npm install --force
 
 # Copy backend source, Drizzle SQL schema, and shared domain modules
-COPY tsconfig.json firebase-applet-config.json* ./
+COPY index.html vite.config.ts tsconfig.json metadata.json firebase-applet-config.json* ./
+COPY public/ ./public/
 COPY server.ts ./
 COPY src/ ./src/
+
+# Pre-build frontend bundle so standalone backend deployments also serve UI with explicit MIME types
+RUN npm run build
 
 # Prepare persistent data directory owned by non-root node user
 RUN mkdir -p /app/data && chown -R node:node /app

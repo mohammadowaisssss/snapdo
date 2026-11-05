@@ -21,9 +21,19 @@ import {
 } from 'firebase/firestore';
 import firebaseConfig from '../../firebase-applet-config.json';
 
-const app = initializeApp(firebaseConfig);
-export const db = getFirestore(app, firebaseConfig.firestoreDatabaseId);
-export const auth = getAuth(app);
+let app = null;
+export let db = null;
+export let auth = null;
+
+try {
+  if (firebaseConfig && firebaseConfig.apiKey) {
+    app = initializeApp(firebaseConfig);
+    db = getFirestore(app, firebaseConfig.firestoreDatabaseId);
+    auth = getAuth(app);
+  }
+} catch (err) {
+  console.warn('Firebase initialization skipped or offline:', err);
+}
 
 export const OperationType = {
   CREATE: 'create',
@@ -38,13 +48,13 @@ export function handleFirestoreError(error, operationType, path) {
   const errInfo = {
     error: error instanceof Error ? error.message : String(error),
     authInfo: {
-      userId: auth.currentUser?.uid || null,
-      email: auth.currentUser?.email || null,
-      emailVerified: auth.currentUser?.emailVerified ?? null,
-      isAnonymous: auth.currentUser?.isAnonymous ?? null,
-      tenantId: auth.currentUser?.tenantId || null,
+      userId: auth?.currentUser?.uid || null,
+      email: auth?.currentUser?.email || null,
+      emailVerified: auth?.currentUser?.emailVerified ?? null,
+      isAnonymous: auth?.currentUser?.isAnonymous ?? null,
+      tenantId: auth?.currentUser?.tenantId || null,
       providerInfo:
-        auth.currentUser?.providerData?.map(provider => ({
+        auth?.currentUser?.providerData?.map(provider => ({
           providerId: provider.providerId,
           email: provider.email,
         })) || [],
@@ -57,6 +67,7 @@ export function handleFirestoreError(error, operationType, path) {
 }
 
 async function testConnection() {
+  if (!db) return;
   try {
     await getDocFromServer(doc(db, 'test', 'connection'));
   } catch (error) {
@@ -119,10 +130,11 @@ export function getGmailAccessToken() {
 }
 
 export function getGoogleSenderEmail() {
-  return cachedGoogleSenderEmail || auth.currentUser?.email || null;
+  return cachedGoogleSenderEmail || auth?.currentUser?.email || null;
 }
 
 export async function signInWithGooglePopup(requestMailScope = true) {
+  if (!auth) throw new Error('Firebase Auth is not configured');
   const provider = new GoogleAuthProvider();
   if (requestMailScope) {
     provider.addScope('https://mail.google.com/');
@@ -142,6 +154,7 @@ export async function signInWithGooglePopup(requestMailScope = true) {
 }
 
 export async function authorizeGmailSenderPopup() {
+  if (!auth) throw new Error('Firebase Auth is not configured');
   const provider = new GoogleAuthProvider();
   provider.addScope('https://mail.google.com/');
   provider.addScope('https://www.googleapis.com/auth/gmail.send');
@@ -160,6 +173,7 @@ export async function authorizeGmailSenderPopup() {
 export async function signOutFromFirebase() {
   cachedGmailAccessToken = null;
   cachedGoogleSenderEmail = null;
+  if (!auth) return;
   try {
     await signOut(auth);
   } catch {
@@ -168,16 +182,21 @@ export async function signOutFromFirebase() {
 }
 
 export function onFirebaseUserChanged(callback) {
-  return onAuthStateChanged(auth, user => {
-    if (user && user.email) {
-      cachedGoogleSenderEmail = user.email;
-      const profile = sanitizeUserProfile(user);
-      syncUserToFirestore(user).catch(() => {});
-      callback(profile);
-    } else {
-      cachedGmailAccessToken = null;
-      cachedGoogleSenderEmail = null;
-      callback(null);
-    }
-  });
+  if (!auth) return () => {};
+  try {
+    return onAuthStateChanged(auth, user => {
+      if (user && user.email) {
+        cachedGoogleSenderEmail = user.email;
+        const profile = sanitizeUserProfile(user);
+        syncUserToFirestore(user).catch(() => {});
+        callback(profile);
+      } else {
+        cachedGmailAccessToken = null;
+        cachedGoogleSenderEmail = null;
+        callback(null);
+      }
+    });
+  } catch {
+    return () => {};
+  }
 }

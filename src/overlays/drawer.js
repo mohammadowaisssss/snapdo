@@ -5,8 +5,8 @@ import { MOD, TODAY, ago, diffD, esc, fmtDate, parse, relDate } from '../core/ut
 import { ic } from '../core/icons.js';
 import { D, S, commentsOf, isOver, mem, pColor, proj, task } from '../core/store.js';
 import { FT, av, filePrev, fileType, fmtComment, lbl, md, mdToolbar, progBar } from '../ui/helpers.js';
-import { normalizeHtmlToMarkdown } from '../core/markdown.ts';
-import { safeImageSrc } from '../core/security.ts';
+import { normalizeHtmlToMarkdown } from '../core/markdown.js';
+import { safeImageSrc } from '../core/security.js';
 import { fxc } from '../shell/render.js';
 import { cellAssignee, cellDue, cellPrio, cellProject, cellStatus } from '../components/task-list.js';
 import { modalHtml } from './modals.js';

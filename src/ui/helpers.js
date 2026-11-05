@@ -3,8 +3,8 @@ import { TODAY, diffD, esc, parse, relDate } from '../core/utils.js';
 import { ic } from '../core/icons.js';
 import { LB, PR, PSTAT, ST } from '../core/constants.js';
 import { D, S, mem, pColor } from '../core/store.js';
-import { renderMarkdown } from '../core/markdown.ts';
-import { safeCssColor, safeImageSrc, safePdfSrc } from '../core/security.ts';
+import { renderMarkdown } from '../core/markdown.js';
+import { safeCssColor, safeImageSrc, safePdfSrc } from '../core/security.js';
 
 export function av(id, cls = '', tip = true) {
   const m = mem(id);

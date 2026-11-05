@@ -5,7 +5,7 @@ import { PCOLORS, PICONS } from '../core/constants.js';
 import { D, S, mem, pColor, proj, task, teamsList } from '../core/store.js';
 import { FT, av, fileFullPreview, filePrev, lbl, md, mdToolbar, prPill, stPill } from '../ui/helpers.js';
 import { getGmailAccessToken, getGoogleSenderEmail } from '../core/firebase.js';
-import { safeHref } from '../core/security.ts';
+import { safeHref } from '../core/security.js';
 import { focusKey, render } from '../shell/render.js';
 import { teamModal } from '../features/teams.js';
 

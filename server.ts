@@ -250,6 +250,36 @@ async function dispatchOutboxEmail(
   return outboxItem;
 }
 
+export const EXPLICIT_MIME_TYPES: Record<string, string> = {
+  '.js': 'text/javascript; charset=utf-8',
+  '.mjs': 'text/javascript; charset=utf-8',
+  '.cjs': 'text/javascript; charset=utf-8',
+  '.ts': 'text/javascript; charset=utf-8',
+  '.css': 'text/css; charset=utf-8',
+  '.html': 'text/html; charset=utf-8',
+  '.htm': 'text/html; charset=utf-8',
+  '.json': 'application/json; charset=utf-8',
+  '.map': 'application/json; charset=utf-8',
+  '.webmanifest': 'application/manifest+json; charset=utf-8',
+  '.svg': 'image/svg+xml; charset=utf-8',
+  '.svgz': 'image/svg+xml; charset=utf-8',
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.gif': 'image/gif',
+  '.webp': 'image/webp',
+  '.avif': 'image/avif',
+  '.ico': 'image/x-icon',
+  '.woff': 'font/woff',
+  '.woff2': 'font/woff2',
+  '.ttf': 'font/ttf',
+  '.otf': 'font/otf',
+  '.wasm': 'application/wasm',
+  '.txt': 'text/plain; charset=utf-8',
+  '.xml': 'application/xml; charset=utf-8',
+  '.pdf': 'application/pdf',
+};
+
 export function createApp() {
   const app = express();
   app.disable('x-powered-by');
@@ -258,8 +288,8 @@ export function createApp() {
   ensureRelationalDatabaseSeeded();
   syncPostgresMirrorIfEnabled().catch(() => {});
 
-  // 1. Security Headers Middleware (CSP, nosniff, Referrer-Policy, Permissions-Policy)
-  app.use((_req, res, next) => {
+  // 1. Security Headers & Explicit MIME-Type Enforcement Middleware
+  app.use((req, res, next) => {
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('X-XSS-Protection', '0');
     res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
@@ -271,14 +301,24 @@ export function createApp() {
         "script-src 'self' 'unsafe-inline' https://apis.google.com https://*.firebaseapp.com https://*.gstatic.com",
         "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
         "font-src 'self' https://fonts.gstatic.com data:",
-        "img-src 'self' data: blob: https:",
-        "connect-src 'self' ws: wss: https://*.googleapis.com https://*.firebaseio.com https://*.firebaseapp.com",
+        "img-src 'self' data: blob: https: http:",
+        "connect-src 'self' http: https: ws: wss: https://*.googleapis.com https://*.firebaseio.com https://*.firebaseapp.com",
+        "worker-src 'self' blob:",
         "frame-src 'self' data: https://*.firebaseapp.com https://accounts.google.com",
         "object-src 'none'",
         "base-uri 'self'",
         "form-action 'self'",
       ].join('; '),
     );
+
+    // Guarantee explicit Content-Type for static JS/CSS/SVG/WASM/Font requests regardless of host OS /etc/mime.types
+    if (!req.path.startsWith('/api/')) {
+      const cleanPath = req.path.split('?')[0];
+      const ext = path.extname(cleanPath).toLowerCase();
+      if (ext && EXPLICIT_MIME_TYPES[ext]) {
+        res.setHeader('Content-Type', EXPLICIT_MIME_TYPES[ext]);
+      }
+    }
     next();
   });
 
@@ -1015,34 +1055,93 @@ export function createApp() {
   return app;
 }
 
+export function mountCompiledDist(app: express.Express, distPath: string) {
+  const distIndex = path.join(distPath, 'index.html');
+  app.use(
+    express.static(distPath, {
+      setHeaders(res, filePath) {
+        const ext = path.extname(filePath).toLowerCase();
+        if (ext && EXPLICIT_MIME_TYPES[ext]) {
+          res.setHeader('Content-Type', EXPLICIT_MIME_TYPES[ext]);
+        }
+      },
+    }),
+  );
+
+  // Resilient fallback if a browser with a cached index.html requests an older hashed /assets/*.js or /assets/*.css file
+  app.get('/assets/:file', (req, res, next) => {
+    const requested = req.params.file || '';
+    const ext = path.extname(requested).toLowerCase();
+    const assetsDir = path.join(distPath, 'assets');
+    if ((ext === '.js' || ext === '.mjs' || ext === '.css') && fs.existsSync(assetsDir)) {
+      const files = fs.readdirSync(assetsDir);
+      const match = files.find(f => path.extname(f).toLowerCase() === ext);
+      if (match) {
+        res.setHeader('Content-Type', EXPLICIT_MIME_TYPES[ext]);
+        res.sendFile(path.join(assetsDir, match));
+        return;
+      }
+    }
+    next();
+  });
+
+  if (fs.existsSync(distIndex)) {
+    app.get('*', (req, res, next) => {
+      if (req.path.startsWith('/api/')) return next();
+      const ext = path.extname(req.path).toLowerCase();
+      // Never return index.html (text/html) for missing .js/.css/.wasm/asset files
+      if (ext && ext !== '.html' && ext !== '.htm') {
+        res.status(404).type('text/plain').send('Asset not found');
+        return;
+      }
+      res.setHeader('Content-Type', 'text/html; charset=utf-8');
+      res.sendFile(distIndex);
+    });
+  }
+}
+
 async function startServer() {
   const app = createApp();
   const PORT = Number(process.env.PORT || 3000);
-  const apiOnly = process.env.API_ONLY === 'true';
+  const distPath = path.join(process.cwd(), 'dist');
+  const distIndex = path.join(distPath, 'index.html');
 
-  if (!apiOnly) {
-    if (process.env.NODE_ENV !== 'production') {
+  if (process.env.NODE_ENV !== 'production') {
+    const vite = await createViteServer({
+      server: { middlewareMode: true, allowedHosts: true as const },
+      appType: 'spa',
+    });
+    app.use(vite.middlewares);
+  } else {
+    // If NODE_ENV=production was started without running `npm run build` first, build dist/ automatically
+    if (!fs.existsSync(distIndex)) {
+      try {
+        console.log('Building production frontend bundle into dist/...');
+        const { build } = await import('vite');
+        await build();
+      } catch (err) {
+        console.error('Automatic Vite build failed, falling back to Vite middleware:', err);
+      }
+    }
+
+    if (fs.existsSync(distIndex)) {
+      mountCompiledDist(app, distPath);
+    } else {
       const vite = await createViteServer({
-        server: { middlewareMode: true },
+        server: { middlewareMode: true, allowedHosts: true as const },
         appType: 'spa',
       });
       app.use(vite.middlewares);
-    } else {
-      const distPath = path.join(process.cwd(), 'dist');
-      if (fs.existsSync(distPath)) {
-        app.use(express.static(distPath));
-        app.get('*', (_req, res) => {
-          res.sendFile(path.join(distPath, 'index.html'));
-        });
-      }
     }
   }
 
   app.listen(PORT, '0.0.0.0', () => {
-    console.log(`Snapsec TaskTracker ${apiOnly ? 'API ' : ''}server running on http://localhost:${PORT}`);
+    console.log(`Snapsec TaskTracker server running on http://localhost:${PORT}`);
   });
 }
 
 if (process.env.NODE_ENV !== 'test') {
   startServer();
 }
+
+

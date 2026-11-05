@@ -739,14 +739,14 @@ test('Security Suite: XSS, SQLi/NoSQLi, Prototype Pollution, SSRF, Open Redirect
   }
 });
 
-test('Dockerization files (Dockerfile.backend, Dockerfile.ui, docker/nginx.conf, docker-compose.yml) are valid and include PostgreSQL', async () => {
+test('Dockerization & Arch Linux Server Hosting: explicit JS/CSS/SVG MIME types in Nginx and Express production static server', async () => {
   const fs = await import('node:fs');
   const path = await import('node:path');
   const root = process.cwd();
 
   const backendDockerfile = fs.readFileSync(path.join(root, 'Dockerfile.backend'), 'utf8');
   assert.ok(backendDockerfile.includes('FROM node:22-alpine'));
-  assert.ok(backendDockerfile.includes('API_ONLY=true'));
+  assert.ok(backendDockerfile.includes('RUN npm run build'));
   assert.ok(backendDockerfile.includes('EXPOSE 4000'));
   assert.ok(backendDockerfile.includes('HEALTHCHECK'));
 
@@ -757,6 +757,9 @@ test('Dockerization files (Dockerfile.backend, Dockerfile.ui, docker/nginx.conf,
   assert.ok(uiDockerfile.includes('COPY docker/nginx.conf'));
 
   const nginxConf = fs.readFileSync(path.join(root, 'docker/nginx.conf'), 'utf8');
+  assert.ok(nginxConf.includes('text/javascript                                  js mjs cjs;'));
+  assert.ok(nginxConf.includes('add_header Content-Type "text/javascript; charset=utf-8" always;'));
+  assert.ok(nginxConf.includes('add_header Content-Type "text/css; charset=utf-8" always;'));
   assert.ok(nginxConf.includes('proxy_pass http://backend:4000/api/;'));
   assert.ok(nginxConf.includes('try_files $uri $uri/ /index.html;'));
 
@@ -767,6 +770,46 @@ test('Dockerization files (Dockerfile.backend, Dockerfile.ui, docker/nginx.conf,
   assert.ok(composeFile.includes('dockerfile: Dockerfile.ui'));
   assert.ok(composeFile.includes('snapsec_data:/app/data'));
   assert.ok(composeFile.includes('"3000:80"'));
+
+  // Verify production dist/ bundle exists and serves .js, .css, .svg, and .html with exact Content-Type headers
+  const distPath = path.join(root, 'dist');
+  if (fs.existsSync(path.join(distPath, 'index.html'))) {
+    const { createApp, mountCompiledDist } = await import('../../server');
+    const app = createApp();
+    mountCompiledDist(app, distPath);
+    const server = await new Promise<any>(resolve => {
+      const s = app.listen(0, '127.0.0.1', () => resolve(s));
+    });
+    const base = `http://127.0.0.1:${server.address().port}`;
+    try {
+      const htmlRes = await fetch(`${base}/`);
+      assert.equal(htmlRes.status, 200);
+      assert.ok(htmlRes.headers.get('content-type')?.includes('text/html'));
+
+      // Check stale/hashed .js fallback returns text/javascript (never text/html)
+      const jsRes = await fetch(`${base}/assets/index-stale-hash.js`);
+      assert.equal(jsRes.status, 200);
+      assert.ok(
+        jsRes.headers.get('content-type')?.includes('text/javascript'),
+        `Expected text/javascript for .js bundle, got: ${jsRes.headers.get('content-type')}`,
+      );
+
+      // Check stale/hashed .css fallback returns text/css
+      const cssRes = await fetch(`${base}/assets/index-stale-hash.css`);
+      assert.equal(cssRes.status, 200);
+      assert.ok(
+        cssRes.headers.get('content-type')?.includes('text/css'),
+        `Expected text/css for .css bundle, got: ${cssRes.headers.get('content-type')}`,
+      );
+
+      // Check missing top-level .js returns 404 (never text/html)
+      const missingJsRes = await fetch(`${base}/missing-module.js`);
+      assert.equal(missingJsRes.status, 404);
+      assert.ok(!missingJsRes.headers.get('content-type')?.includes('text/html'));
+    } finally {
+      await new Promise<void>(resolve => server.close(() => resolve()));
+    }
+  }
 });
 
 test('Relational SQL Database Engine: WAL mode, Foreign Keys, B-tree Indexes, ACID Transactions, and Indexed SQL Queries', async () => {

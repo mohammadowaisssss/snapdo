@@ -13,6 +13,7 @@ RUN npm install --force
 
 COPY index.html vite.config.ts tsconfig.json metadata.json ./
 COPY firebase-applet-config.json* ./
+COPY public/ ./public/
 COPY src/ ./src/
 
 RUN npm run build
