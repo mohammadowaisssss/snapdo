@@ -4,6 +4,7 @@
 import { $, uid } from '../core/utils.js';
 import { PCOLORS } from '../core/constants.js';
 import { D, S, mem, team, teamsList } from '../core/store.js';
+import { api } from '../core/api.js';
 import { mutate, toast } from '../ui/toast.js';
 import { go, render } from '../shell/render.js';
 import { openModal } from '../overlays/modals.js';
@@ -73,9 +74,11 @@ A.submitTeam = () => {
       D().members.forEach(x => {
         if (x.team === t.id && !f.members.includes(x.id)) x.team = '';
       });
+      api.updateTeam(t.id, { name: f.name, desc: f.desc, icon: f.icon, color: f.color, members: f.members });
     } else {
       t = { id: uid('tm'), name: f.name, desc: f.desc || 'No description yet.', icon: f.icon, c: PCOLORS[f.color] };
       teamsList().push(t);
+      api.createTeam({ id: t.id, name: f.name, desc: t.desc, icon: f.icon, color: f.color, members: f.members });
     }
     f.members.forEach(id => {
       const x = mem(id);
@@ -114,6 +117,7 @@ A.delTeam = el => {
           D().projects.forEach(p => {
             if (p.team === t.id) p.team = '';
           });
+          api.deleteTeam(t.id);
         })
       ) {
         if (S.ui.route === 'team') go('teams');
@@ -122,3 +126,4 @@ A.delTeam = el => {
     },
   });
 };
+

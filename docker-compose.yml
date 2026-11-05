@@ -1,4 +1,25 @@
 services:
+  db:
+    image: postgres:16-alpine
+    container_name: snapsec-tasktracker-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${PGUSER:-snapsec}
+      POSTGRES_PASSWORD: ${PGPASSWORD:-snapsec_prod_secret}
+      POSTGRES_DB: ${PGDATABASE:-snapsec_tasktracker}
+    ports:
+      - "5432:5432"
+    volumes:
+      - snapsec_pgdata:/var/lib/postgresql/data
+    networks:
+      - snapsec_net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${PGUSER:-snapsec} -d ${PGDATABASE:-snapsec_tasktracker}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+
   backend:
     build:
       context: .
@@ -10,12 +31,21 @@ services:
       API_ONLY: "true"
       PORT: 4000
       APP_URL: ${APP_URL:-http://localhost:3000}
+      PGHOST: ${PGHOST:-db}
+      PGPORT: ${PGPORT:-5432}
+      PGUSER: ${PGUSER:-snapsec}
+      PGPASSWORD: ${PGPASSWORD:-snapsec_prod_secret}
+      PGDATABASE: ${PGDATABASE:-snapsec_tasktracker}
+      SQLITE_DB_PATH: /app/data/snapsec.sqlite
       SMTP_HOST: ${SMTP_HOST:-}
       SMTP_PORT: ${SMTP_PORT:-465}
       SMTP_USER: ${SMTP_USER:-}
       SMTP_PASS: ${SMTP_PASS:-}
     ports:
       - "4000:4000"
+    depends_on:
+      db:
+        condition: service_healthy
     volumes:
       - snapsec_data:/app/data
     networks:
@@ -48,9 +78,12 @@ services:
       start_period: 5s
 
 volumes:
+  snapsec_pgdata:
+    driver: local
   snapsec_data:
     driver: local
 
 networks:
   snapsec_net:
     driver: bridge
+

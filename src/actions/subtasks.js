@@ -3,6 +3,7 @@
    ===================================================================== */
 import { $, esc } from '../core/utils.js';
 import { S, logAct, save, task } from '../core/store.js';
+import { api } from '../core/api.js';
 import { mutate, toast } from '../ui/toast.js';
 import { render } from '../shell/render.js';
 import { A, BLUR, IN, createTask } from './actions.js';
@@ -42,6 +43,7 @@ BLUR.commitSubTitle = el => {
     mutate(() => {
       s.title = v;
       t.updated = Date.now();
+      api.updateSubtask(t.id, s.id, { title: v });
     });
 };
 IN.subNote = el => {
@@ -50,6 +52,7 @@ IN.subNote = el => {
   if (s) {
     s.note = el.value;
     save();
+    api.updateSubtask(t.id, s.id, { note: s.note });
   }
 };
 A.promoteSub = el => {
@@ -70,6 +73,7 @@ A.promoteSub = el => {
         desc: s.note || '',
       });
       t.subtasks = t.subtasks.filter(x => x !== s);
+      api.deleteSubtask(t.id, s.id);
       logAct('converted a subtask of', t, `into ${n.key}`);
     })
   )
@@ -78,3 +82,4 @@ A.promoteSub = el => {
   render();
   toast(`Converted to ${n.key}`, { action: 'Open', onAction: () => A.openTask({ dataset: { id: n.id } }) });
 };
+

@@ -3,6 +3,7 @@
    ===================================================================== */
 import { esc } from '../core/utils.js';
 import { logAct, task } from '../core/store.js';
+import { api } from '../core/api.js';
 import { mutate, toast } from '../ui/toast.js';
 import { A, confirmDlg, deleteTasks } from './actions.js';
 
@@ -12,6 +13,7 @@ A.restoreTask = el => {
     mutate(() => {
       t.archived = false;
       t.archivedAt = null;
+      api.restoreTask(t.id);
       logAct('restored', t);
     })
   )

@@ -4,68 +4,81 @@ import path from 'node:path';
 import nodemailer from 'nodemailer';
 import { createServer as createViteServer } from 'vite';
 import {
-  PersistedStore,
-  acceptInviteTokenRecord,
-  addCommentRecord,
-  addFileRecord,
-  addSubtaskRecord,
-  applyTaskPatch,
-  archiveTaskRecord,
-  authenticateWorkspaceUser,
-  buildInvitationEmail,
-  computeProjectProgress,
   computeTaskProgress,
-  computeWorkspaceMetrics,
-  createDefaultState,
-  createProjectRecord,
-  createTaskRecord,
-  createTeamRecord,
-  deleteCommentRecord,
-  deleteFileRecord,
-  deleteProjectRecord,
-  deleteSubtaskRecord,
-  deleteTaskRecords,
-  deleteTeamRecord,
-  duplicateFileRecord,
-  duplicateProjectRecord,
-  duplicateTaskRecord,
-  filterTasks,
-  inviteMemberRecords,
-  promoteSubtaskRecord,
-  removeMemberRecord,
-  renameFileRecord,
-  restoreTaskRecord,
-  toggleCommentReaction,
-  updateProjectRecord,
-  updateSubtaskRecord,
-  updateTeamRecord,
   validateAuthCredentials,
 } from './src/backend/engine.js';
-import { uid } from './src/core/utils.js';
 import {
   isSafeSmtpTarget,
-  safeCssColor,
-  safeImageSrc,
   safeString,
   sanitizeBaseUrl,
   sanitizeHeaderValue,
   stripDangerousKeys,
 } from './src/core/security.ts';
-
-const DATA_DIR = path.resolve(process.cwd(), 'data');
-const DB_FILE = path.join(DATA_DIR, 'snapsec-db.json');
-
-const ALLOWED_MEMBER_PATCH_KEYS = new Set([
-  'name',
-  'email',
-  'role',
-  'team',
-  'title',
-  'c',
-  'status',
-  'tz',
-  'photoURL',
-]);
+import { uid } from './src/core/utils.js';
+import { isPostgresConfigured } from './src/db/index.ts';
+import {
+  acceptInviteTokenSql,
+  archiveTaskSql,
+  authenticateWorkspaceUserSql,
+  createResendInviteSql,
+  deleteCommentSql,
+  deleteFileSql,
+  deleteMemberSql,
+  deleteOtherSessionsSql,
+  deleteProjectSql,
+  deleteReadNotificationsSql,
+  deleteSavedViewSql,
+  deleteSessionSql,
+  deleteSubtaskSql,
+  deleteTasksSql,
+  deleteTeamSql,
+  duplicateFileSql,
+  duplicateProjectSql,
+  duplicateTaskSql,
+  ensureRelationalDatabaseSeeded,
+  getProjectByIdSql,
+  getSmtpConfigSql,
+  insertCommentSql,
+  insertFileSql,
+  insertProjectSql,
+  insertSavedViewSql,
+  insertSubtaskSql,
+  insertTaskSql,
+  insertTeamSql,
+  inviteMembersSql,
+  listActivityLogsSql,
+  listFilesSql,
+  listMembersAndOutboxSql,
+  listNotificationsSql,
+  listProjectsSql,
+  listTeamsSql,
+  markAllNotificationsReadSql,
+  markNotificationReadSql,
+  patchMemberSql,
+  patchPreferencesSql,
+  patchProjectSql,
+  patchSubtaskSql,
+  patchTaskSql,
+  patchTeamSql,
+  patchWorkspaceSql,
+  populateAllTablesTransaction,
+  promoteSubtaskSql,
+  queryBootstrapStore,
+  queryTaskByIdSql,
+  queryTaskCommentsSql,
+  queryTasksSql,
+  queryWorkspaceMetrics,
+  renameFileSql,
+  renameSavedViewSql,
+  reorderProjectsSql,
+  resetDatabaseToDefaultSql,
+  restoreTaskSql,
+  saveSmtpConfigSql,
+  setTwoFactorSql,
+  syncPostgresMirrorIfEnabled,
+  toggleCommentReactionSql,
+  updateOutboxItemDeliverySql,
+} from './src/db/repository.ts';
 
 let cachedEtherealAccount: any = null;
 
@@ -93,7 +106,6 @@ function buildRawMimeEmail(outboxItem: any, fromEmail: string): string {
 }
 
 async function dispatchOutboxEmail(
-  store: PersistedStore,
   outboxItem: any,
   opts: { googleAccessToken?: string; senderEmail?: string } = {},
 ) {
@@ -102,6 +114,7 @@ async function dispatchOutboxEmail(
     outboxItem.status = 'sent';
     outboxItem.transport = 'test';
     outboxItem.deliveredToInbox = true;
+    updateOutboxItemDeliverySql(outboxItem);
     return outboxItem;
   }
 
@@ -127,6 +140,7 @@ async function dispatchOutboxEmail(
         outboxItem.transport = 'gmail-api';
         outboxItem.deliveredToInbox = true;
         outboxItem.transportError = undefined;
+        updateOutboxItemDeliverySql(outboxItem);
         return outboxItem;
       }
     } catch {
@@ -156,14 +170,15 @@ async function dispatchOutboxEmail(
       outboxItem.transport = 'gmail-smtp-oauth';
       outboxItem.deliveredToInbox = true;
       outboxItem.transportError = undefined;
+      updateOutboxItemDeliverySql(outboxItem);
       return outboxItem;
     } catch (oauthErr: any) {
       outboxItem.oauthError = oauthErr?.message || 'Google OAuth SMTP failed';
     }
   }
 
-  // 2. Try Custom SMTP / Gmail App Password (smtp.gmail.com or custom SMTP server)
-  const customSmtp = store.data?.smtpConfig;
+  // 2. Try Custom SMTP / Gmail App Password (queried directly from SQL database)
+  const customSmtp = getSmtpConfigSql();
   const host = (customSmtp?.host || process.env.SMTP_HOST || '').trim();
   const port = Number(customSmtp?.port || process.env.SMTP_PORT || 465);
   const user = (customSmtp?.user || process.env.SMTP_USER || '').trim();
@@ -190,13 +205,14 @@ async function dispatchOutboxEmail(
       outboxItem.transport = 'custom-smtp';
       outboxItem.deliveredToInbox = true;
       outboxItem.transportError = undefined;
+      updateOutboxItemDeliverySql(outboxItem);
       return outboxItem;
     } catch (smtpErr: any) {
       outboxItem.transportError = smtpErr?.message || 'Custom SMTP authentication failed';
     }
   }
 
-  // 3. Fallback: Ethereal SMTP sandbox (generates live webmail preview URL)
+  // 3. Fallback: Ethereal SMTP sandbox
   try {
     if (!cachedEtherealAccount) {
       cachedEtherealAccount = await nodemailer.createTestAccount();
@@ -230,75 +246,19 @@ async function dispatchOutboxEmail(
     outboxItem.deliveredToInbox = false;
     outboxItem.transportError = err?.message || 'SMTP relay unavailable';
   }
+  updateOutboxItemDeliverySql(outboxItem);
   return outboxItem;
-}
-
-function sanitizeLegacyIdentity(store: PersistedStore) {
-  let changed = false;
-  if (store?.prefs?.name === 'Tanjim Islam') {
-    store.prefs.name = 'Mohammad Owais';
-    changed = true;
-  }
-  const m1 = (store?.data?.members || []).find((m: any) => m.id === 'm1');
-  if (m1 && (m1.name === 'Tanjim Islam' || m1.email === 'hello@snapsec.com')) {
-    m1.name = store?.prefs?.name || 'Mohammad Owais';
-    m1.email = 'mohammadowais616@gmail.com';
-    changed = true;
-  }
-  (store?.data?.comments || []).forEach((c: any) => {
-    if (typeof c.text === 'string' && c.text.includes('@Tanjim Islam')) {
-      c.text = c.text.replace(/@Tanjim Islam/g, `@${m1?.name || 'Mohammad Owais'}`);
-      changed = true;
-    }
-  });
-  (store?.data?.notifs || []).forEach((n: any) => {
-    if (typeof n.snippet === 'string' && n.snippet.includes('@Tanjim Islam')) {
-      n.snippet = n.snippet.replace(/@Tanjim Islam/g, `@${m1?.name || 'Mohammad Owais'}`);
-      changed = true;
-    }
-  });
-  return changed;
-}
-
-function loadDatabase(): PersistedStore {
-  try {
-    if (fs.existsSync(DB_FILE)) {
-      const raw = fs.readFileSync(DB_FILE, 'utf8');
-      const parsed = JSON.parse(raw);
-      if (parsed && parsed.data && Array.isArray(parsed.data.tasks)) {
-        if (sanitizeLegacyIdentity(parsed)) {
-          saveDatabase(parsed);
-        }
-        return parsed;
-      }
-    }
-  } catch (err) {
-    console.error('Failed to read database file, re-initializing from seed:', err);
-  }
-  const initial = createDefaultState();
-  saveDatabase(initial);
-  return initial;
-}
-
-function saveDatabase(store: PersistedStore) {
-  try {
-    if (!fs.existsSync(DATA_DIR)) {
-      fs.mkdirSync(DATA_DIR, { recursive: true });
-    }
-    store.updatedAt = Date.now();
-    const tmpFile = `${DB_FILE}.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2, 7)}.tmp`;
-    fs.writeFileSync(tmpFile, JSON.stringify(store), 'utf8');
-    fs.renameSync(tmpFile, DB_FILE);
-  } catch (err) {
-    console.error('Failed to persist database:', err);
-  }
 }
 
 export function createApp() {
   const app = express();
   app.disable('x-powered-by');
 
-  // 1. Security Headers Middleware (CSP, nosniff, frame-ancestors, Referrer-Policy, Permissions-Policy)
+  // Ensure relational SQL tables and B-tree indexes are initialized
+  ensureRelationalDatabaseSeeded();
+  syncPostgresMirrorIfEnabled().catch(() => {});
+
+  // 1. Security Headers Middleware (CSP, nosniff, Referrer-Policy, Permissions-Policy)
   app.use((_req, res, next) => {
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('X-XSS-Protection', '0');
@@ -324,7 +284,7 @@ export function createApp() {
 
   app.use(express.json({ limit: '15mb' }));
 
-  // 2. Global Prototype Pollution & NoSQL Operator Sanitizer Middleware
+  // 2. Global Prototype Pollution & Operator Sanitizer Middleware
   app.use((req, _res, next) => {
     if (req.body && typeof req.body === 'object') {
       req.body = stripDangerousKeys(req.body);
@@ -341,83 +301,87 @@ export function createApp() {
 
   // 3. Sliding-Window Rate Limiter for sensitive Auth / Invite / SMTP endpoints
   const rateBuckets = new Map<string, { count: number; resetAt: number }>();
-  const rateLimit = (maxRequests: number, windowMs: number) => (req: express.Request, res: express.Response, next: express.NextFunction) => {
-    if (process.env.NODE_ENV === 'test') return next();
-    const key = `${req.ip || 'local'}:${req.path}`;
-    const now = Date.now();
-    const entry = rateBuckets.get(key);
-    if (!entry || now > entry.resetAt) {
-      rateBuckets.set(key, { count: 1, resetAt: now + windowMs });
-      return next();
-    }
-    entry.count++;
-    if (entry.count > maxRequests) {
-      res.status(429).json({ error: 'Too many requests. Please wait a moment and try again.' });
-      return;
-    }
-    next();
-  };
+  const rateLimit =
+    (maxRequests: number, windowMs: number) =>
+    (req: express.Request, res: express.Response, next: express.NextFunction) => {
+      if (process.env.NODE_ENV === 'test') return next();
+      const key = `${req.ip || 'local'}:${req.path}`;
+      const now = Date.now();
+      const entry = rateBuckets.get(key);
+      if (!entry || now > entry.resetAt) {
+        rateBuckets.set(key, { count: 1, resetAt: now + windowMs });
+        return next();
+      }
+      entry.count++;
+      if (entry.count > maxRequests) {
+        res.status(429).json({ error: 'Too many requests. Please wait a moment and try again.' });
+        return;
+      }
+      next();
+    };
 
-  let db: PersistedStore = loadDatabase();
-
-  // --- Health & Bootstrap ---
+  // --- Health & Bootstrap (Backed by Relational SQL Queries & Aggregates) ---
   app.get('/api/health', (_req, res) => {
+    const metrics = queryWorkspaceMetrics();
     res.json({
       status: 'ok',
       service: 'Snapsec TaskTracker Backend',
-      updatedAt: db.updatedAt,
-      metrics: computeWorkspaceMetrics(db.data),
+      database: isPostgresConfigured() ? 'postgresql-drizzle' : 'sqlite-wal-drizzle',
+      updatedAt: metrics.updatedAt,
+      metrics,
     });
   });
 
   app.get('/api/bootstrap', (_req, res) => {
+    const store = queryBootstrapStore();
+    const metrics = queryWorkspaceMetrics();
     res.json({
-      data: db.data,
-      prefs: db.prefs,
-      views: db.views,
-      collapsed: db.collapsed,
-      updatedAt: db.updatedAt,
-      metrics: computeWorkspaceMetrics(db.data),
+      data: store.data,
+      prefs: store.prefs,
+      views: store.views,
+      collapsed: store.collapsed,
+      updatedAt: store.updatedAt,
+      metrics,
     });
   });
 
   app.get('/api/metrics', (_req, res) => {
-    res.json(computeWorkspaceMetrics(db.data));
+    res.json(queryWorkspaceMetrics());
   });
 
-  // --- Full State Sync & Reset ---
+  // --- Transactional State Restore & Workspace Reset ---
   app.put('/api/state', (req, res) => {
     const { data, prefs, views, collapsed } = stripDangerousKeys(req.body || {});
     if (!data || !Array.isArray(data.tasks) || !Array.isArray(data.projects)) {
       res.status(400).json({ error: 'Invalid state payload: data.tasks and data.projects are required' });
       return;
     }
-    db.data = data;
-    if (prefs && typeof prefs === 'object') db.prefs = { ...db.prefs, ...prefs };
-    if (views && typeof views === 'object') db.views = views;
-    if (typeof collapsed === 'boolean') db.collapsed = collapsed;
-    saveDatabase(db);
-    res.json({ ok: true, updatedAt: db.updatedAt });
+    const current = queryBootstrapStore();
+    const updatedAt = populateAllTablesTransaction({
+      data,
+      prefs: prefs && typeof prefs === 'object' ? { ...current.prefs, ...prefs } : current.prefs,
+      views: views && typeof views === 'object' ? views : current.views,
+      collapsed: typeof collapsed === 'boolean' ? collapsed : current.collapsed,
+      updatedAt: Date.now(),
+    });
+    res.json({ ok: true, updatedAt });
   });
 
   app.post('/api/reset', (_req, res) => {
-    const theme = db.prefs?.theme || 'system';
-    db = createDefaultState();
-    db.prefs.theme = theme;
-    saveDatabase(db);
+    const store = resetDatabaseToDefaultSql();
     res.json({
       ok: true,
-      data: db.data,
-      prefs: db.prefs,
-      views: db.views,
-      collapsed: db.collapsed,
-      updatedAt: db.updatedAt,
+      data: store.data,
+      prefs: store.prefs,
+      views: store.views,
+      collapsed: store.collapsed,
+      updatedAt: store.updatedAt,
     });
   });
 
-  // --- Tasks API ---
+  // --- Tasks API (Indexed SQL Queries & Row-Level ACID Transactions) ---
   app.get('/api/tasks', (req, res) => {
-    const list = filterTasks(db.data, req.query as Record<string, any>).map(t => ({
+    const list = queryTasksSql(req.query as Record<string, any>).map(t => ({
       ...t,
       progress: computeTaskProgress(t),
     }));
@@ -425,12 +389,12 @@ export function createApp() {
   });
 
   app.get('/api/tasks/:id', (req, res) => {
-    const t = (db.data.tasks || []).find((x: any) => x.id === req.params.id);
+    const t = queryTaskByIdSql(req.params.id);
     if (!t) {
       res.status(404).json({ error: 'Task not found' });
       return;
     }
-    const comments = (db.data.comments || []).filter((c: any) => c.task === t.id);
+    const comments = queryTaskCommentsSql(t.id);
     res.json({ task: { ...t, progress: computeTaskProgress(t) }, comments });
   });
 
@@ -440,59 +404,53 @@ export function createApp() {
       res.status(400).json({ error: 'Give the task a name' });
       return;
     }
-    const task = createTaskRecord(db.data, { ...req.body, title });
-    saveDatabase(db);
-    res.status(201).json({ task, updatedAt: db.updatedAt });
+    const { task, updatedAt } = insertTaskSql({ ...req.body, title });
+    res.status(201).json({ task, updatedAt });
   });
 
   app.patch('/api/tasks/:id', (req, res) => {
-    const result = applyTaskPatch(db.data, req.params.id, req.body || {});
+    const result = patchTaskSql(req.params.id, req.body || {});
     if (!result) {
       res.status(404).json({ error: 'Task not found' });
       return;
     }
-    saveDatabase(db);
-    res.json({ ...result, updatedAt: db.updatedAt });
+    res.json(result);
   });
 
   app.post('/api/tasks/:id/duplicate', (req, res) => {
-    const copy = duplicateTaskRecord(db.data, req.params.id);
-    if (!copy) {
+    const result = duplicateTaskSql(req.params.id);
+    if (!result) {
       res.status(404).json({ error: 'Task not found' });
       return;
     }
-    saveDatabase(db);
-    res.status(201).json({ task: copy, updatedAt: db.updatedAt });
+    res.status(201).json(result);
   });
 
   app.post('/api/tasks/:id/archive', (req, res) => {
-    const task = archiveTaskRecord(db.data, req.params.id);
-    if (!task) {
+    const result = archiveTaskSql(req.params.id);
+    if (!result) {
       res.status(404).json({ error: 'Task not found' });
       return;
     }
-    saveDatabase(db);
-    res.json({ task, updatedAt: db.updatedAt });
+    res.json(result);
   });
 
   app.post('/api/tasks/:id/restore', (req, res) => {
-    const task = restoreTaskRecord(db.data, req.params.id);
-    if (!task) {
+    const result = restoreTaskSql(req.params.id);
+    if (!result) {
       res.status(404).json({ error: 'Task not found' });
       return;
     }
-    saveDatabase(db);
-    res.json({ task, updatedAt: db.updatedAt });
+    res.json(result);
   });
 
   app.delete('/api/tasks/:id', (req, res) => {
-    const deleted = deleteTaskRecords(db.data, [req.params.id]);
+    const { deleted, updatedAt } = deleteTasksSql([req.params.id]);
     if (!deleted) {
       res.status(404).json({ error: 'Task not found' });
       return;
     }
-    saveDatabase(db);
-    res.json({ ok: true, deleted, updatedAt: db.updatedAt });
+    res.json({ ok: true, deleted, updatedAt });
   });
 
   app.post('/api/tasks/bulk', (req, res) => {
@@ -502,15 +460,13 @@ export function createApp() {
       return;
     }
     if (action === 'delete') {
-      const deleted = deleteTaskRecords(db.data, ids);
-      saveDatabase(db);
-      res.json({ ok: true, deleted, updatedAt: db.updatedAt });
+      const { deleted, updatedAt } = deleteTasksSql(ids);
+      res.json({ ok: true, deleted, updatedAt });
       return;
     }
     if (patch && typeof patch === 'object') {
-      const updated = ids.map(id => applyTaskPatch(db.data, id, patch)?.task).filter(Boolean);
-      saveDatabase(db);
-      res.json({ ok: true, tasks: updated, updatedAt: db.updatedAt });
+      const updated = ids.map(id => patchTaskSql(String(id), patch)?.task).filter(Boolean);
+      res.json({ ok: true, tasks: updated, updatedAt: Date.now() });
       return;
     }
     res.status(400).json({ error: 'Specify action="delete" or a patch object' });
@@ -518,104 +474,91 @@ export function createApp() {
 
   // --- Subtasks API ---
   app.post('/api/tasks/:id/subtasks', (req, res) => {
-    const sub = addSubtaskRecord(db.data, req.params.id, String(req.body?.title || ''));
-    if (!sub) {
+    const result = insertSubtaskSql(req.params.id, String(req.body?.title || ''));
+    if (!result) {
       res.status(400).json({ error: 'Invalid task or empty subtask title' });
       return;
     }
-    saveDatabase(db);
-    res.status(201).json({ subtask: sub, updatedAt: db.updatedAt });
+    res.status(201).json(result);
   });
 
   app.patch('/api/tasks/:id/subtasks/:sid', (req, res) => {
-    const sub = updateSubtaskRecord(db.data, req.params.id, req.params.sid, req.body || {});
-    if (!sub) {
+    const result = patchSubtaskSql(req.params.id, req.params.sid, req.body || {});
+    if (!result) {
       res.status(404).json({ error: 'Subtask not found' });
       return;
     }
-    saveDatabase(db);
-    res.json({ subtask: sub, updatedAt: db.updatedAt });
+    res.json(result);
   });
 
   app.delete('/api/tasks/:id/subtasks/:sid', (req, res) => {
-    const ok = deleteSubtaskRecord(db.data, req.params.id, req.params.sid);
+    const { ok, updatedAt } = deleteSubtaskSql(req.params.id, req.params.sid);
     if (!ok) {
       res.status(404).json({ error: 'Subtask not found' });
       return;
     }
-    saveDatabase(db);
-    res.json({ ok: true, updatedAt: db.updatedAt });
+    res.json({ ok: true, updatedAt });
   });
 
   app.post('/api/tasks/:id/subtasks/:sid/promote', (req, res) => {
-    const promoted = promoteSubtaskRecord(db.data, req.params.id, req.params.sid);
-    if (!promoted) {
+    const result = promoteSubtaskSql(req.params.id, req.params.sid);
+    if (!result) {
       res.status(404).json({ error: 'Subtask not found' });
       return;
     }
-    saveDatabase(db);
-    res.status(201).json({ task: promoted, updatedAt: db.updatedAt });
+    res.status(201).json(result);
   });
 
   // --- Comments & Reactions API ---
   app.get('/api/tasks/:id/comments', (req, res) => {
-    const comments = (db.data.comments || []).filter((c: any) => c.task === req.params.id);
-    res.json({ comments });
+    res.json({ comments: queryTaskCommentsSql(req.params.id) });
   });
 
   app.post('/api/tasks/:id/comments', (req, res) => {
-    const comment = addCommentRecord(
-      db.data,
+    const result = insertCommentSql(
       req.params.id,
       req.body?.text,
       req.body?.by,
       req.body?.attachments,
     );
-    if (!comment) {
+    if (!result) {
       res.status(400).json({ error: 'Invalid task or empty comment text / attachments' });
       return;
     }
-    saveDatabase(db);
-    res.status(201).json({ comment, updatedAt: db.updatedAt });
+    res.status(201).json(result);
   });
 
   app.delete('/api/comments/:id', (req, res) => {
-    const ok = deleteCommentRecord(db.data, req.params.id);
+    const { ok, updatedAt } = deleteCommentSql(req.params.id);
     if (!ok) {
       res.status(404).json({ error: 'Comment not found' });
       return;
     }
-    saveDatabase(db);
-    res.json({ ok: true, updatedAt: db.updatedAt });
+    res.json({ ok: true, updatedAt });
   });
 
   app.post('/api/comments/:id/reactions', (req, res) => {
-    const comment = toggleCommentReaction(db.data, req.params.id, req.body?.emoji, req.body?.by);
-    if (!comment) {
+    const result = toggleCommentReactionSql(req.params.id, req.body?.emoji, req.body?.by);
+    if (!result) {
       res.status(404).json({ error: 'Comment not found or missing emoji' });
       return;
     }
-    saveDatabase(db);
-    res.json({ comment, updatedAt: db.updatedAt });
+    res.json(result);
   });
 
   // --- Projects API ---
   app.get('/api/projects', (_req, res) => {
-    const projects = (db.data.projects || []).map((p: any) => ({
-      ...p,
-      progress: computeProjectProgress(db.data, p.id),
-    }));
-    res.json({ projects, projOrder: db.data.projOrder });
+    res.json(listProjectsSql());
   });
 
   app.get('/api/projects/:id', (req, res) => {
-    const p = (db.data.projects || []).find((x: any) => x.id === req.params.id);
+    const p = getProjectByIdSql(req.params.id);
     if (!p) {
       res.status(404).json({ error: 'Project not found' });
       return;
     }
-    const tasks = filterTasks(db.data, { project: p.id });
-    res.json({ project: { ...p, progress: computeProjectProgress(db.data, p.id) }, tasks });
+    const tasks = queryTasksSql({ project: p.id });
+    res.json({ project: p, tasks });
   });
 
   app.post('/api/projects', (req, res) => {
@@ -624,59 +567,53 @@ export function createApp() {
       res.status(400).json({ error: 'Give the project a name' });
       return;
     }
-    const project = createProjectRecord(db.data, req.body, req.body?.tmpl || 'blank');
-    saveDatabase(db);
-    res.status(201).json({ project, updatedAt: db.updatedAt });
+    const result = insertProjectSql(req.body, req.body?.tmpl || 'blank');
+    res.status(201).json(result);
   });
 
   app.patch('/api/projects/:id', (req, res) => {
-    const project = updateProjectRecord(db.data, req.params.id, req.body || {});
-    if (!project) {
+    const result = patchProjectSql(req.params.id, req.body || {});
+    if (!result) {
       res.status(404).json({ error: 'Project not found' });
       return;
     }
-    saveDatabase(db);
-    res.json({ project, updatedAt: db.updatedAt });
+    res.json(result);
   });
 
   app.post('/api/projects/:id/duplicate', (req, res) => {
-    const project = duplicateProjectRecord(db.data, req.params.id);
-    if (!project) {
+    const result = duplicateProjectSql(req.params.id);
+    if (!result) {
       res.status(404).json({ error: 'Project not found' });
       return;
     }
-    saveDatabase(db);
-    res.status(201).json({ project, updatedAt: db.updatedAt });
+    res.status(201).json(result);
   });
 
   app.post('/api/projects/:id/archive', (req, res) => {
-    const project = updateProjectRecord(db.data, req.params.id, { archived: true, archivedAt: Date.now() });
-    if (!project) {
+    const result = patchProjectSql(req.params.id, { archived: true, archivedAt: Date.now() });
+    if (!result) {
       res.status(404).json({ error: 'Project not found' });
       return;
     }
-    saveDatabase(db);
-    res.json({ project, updatedAt: db.updatedAt });
+    res.json(result);
   });
 
   app.post('/api/projects/:id/restore', (req, res) => {
-    const project = updateProjectRecord(db.data, req.params.id, { archived: false, archivedAt: null });
-    if (!project) {
+    const result = patchProjectSql(req.params.id, { archived: false, archivedAt: null });
+    if (!result) {
       res.status(404).json({ error: 'Project not found' });
       return;
     }
-    saveDatabase(db);
-    res.json({ project, updatedAt: db.updatedAt });
+    res.json(result);
   });
 
   app.delete('/api/projects/:id', (req, res) => {
-    const ok = deleteProjectRecord(db.data, req.params.id);
+    const { ok, updatedAt } = deleteProjectSql(req.params.id);
     if (!ok) {
       res.status(404).json({ error: 'Project not found' });
       return;
     }
-    saveDatabase(db);
-    res.json({ ok: true, updatedAt: db.updatedAt });
+    res.json({ ok: true, updatedAt });
   });
 
   app.put('/api/projects/order', (req, res) => {
@@ -684,55 +621,53 @@ export function createApp() {
       res.status(400).json({ error: 'projOrder array is required' });
       return;
     }
-    db.data.projOrder = req.body.projOrder;
-    saveDatabase(db);
-    res.json({ ok: true, projOrder: db.data.projOrder });
+    const { projOrder, updatedAt } = reorderProjectsSql(req.body.projOrder);
+    res.json({ ok: true, projOrder, updatedAt });
   });
 
   // --- Teams API ---
   app.get('/api/teams', (_req, res) => {
-    res.json({ teams: db.data.teams || [] });
+    res.json({ teams: listTeamsSql() });
   });
 
   app.post('/api/teams', (req, res) => {
     try {
-      const team = createTeamRecord(db.data, req.body || {});
-      saveDatabase(db);
-      res.status(201).json({ team, updatedAt: db.updatedAt });
+      const result = insertTeamSql(req.body || {});
+      res.status(201).json(result);
     } catch (err: any) {
       res.status(400).json({ error: err.message || 'Failed to create team' });
     }
   });
 
   app.patch('/api/teams/:id', (req, res) => {
-    const team = updateTeamRecord(db.data, req.params.id, req.body || {});
-    if (!team) {
+    const result = patchTeamSql(req.params.id, req.body || {});
+    if (!result) {
       res.status(404).json({ error: 'Team not found' });
       return;
     }
-    saveDatabase(db);
-    res.json({ team, updatedAt: db.updatedAt });
+    res.json(result);
   });
 
   app.delete('/api/teams/:id', (req, res) => {
-    const ok = deleteTeamRecord(db.data, req.params.id);
+    const { ok, updatedAt } = deleteTeamSql(req.params.id);
     if (!ok) {
       res.status(404).json({ error: 'Team not found' });
       return;
     }
-    saveDatabase(db);
-    res.json({ ok: true, updatedAt: db.updatedAt });
+    res.json({ ok: true, updatedAt });
   });
 
   // --- Members & Invitation Emails API ---
   app.get('/api/members', (_req, res) => {
-    res.json({ members: db.data.members || [], me: db.data.me, outbox: db.data.outbox || [] });
+    const { members, me, outbox } = listMembersAndOutboxSql();
+    res.json({ members, me, outbox });
   });
 
   app.get('/api/outbox', (_req, res) => {
+    const { outbox, smtpConfig } = listMembersAndOutboxSql();
     res.json({
-      outbox: db.data.outbox || [],
-      smtpConfigured: !!(process.env.SMTP_HOST || db.data.smtpConfig?.host),
+      outbox,
+      smtpConfigured: !!(process.env.SMTP_HOST || smtpConfig?.host),
     });
   });
 
@@ -750,8 +685,7 @@ export function createApp() {
       }
       const fallbackOrigin = `${req.protocol}://${req.get('host') || 'localhost:3000'}`;
       const origin = sanitizeBaseUrl(req.body?.baseUrl, fallbackOrigin);
-      const invited = inviteMemberRecords(
-        db.data,
+      const { invited, outboxItems, updatedAt } = inviteMembersSql(
         emails,
         safeString(req.body?.role, 40, 'Member') || 'Member',
         safeString(req.body?.team, 80, 'product') || 'product',
@@ -763,19 +697,16 @@ export function createApp() {
         (req.headers.authorization?.startsWith('Bearer ') ? req.headers.authorization.slice(7) : '');
       const senderEmail = sanitizeHeaderValue(req.body?.senderEmail, 150);
       const sentEmails: any[] = [];
-      for (const m of invited) {
-        const msg = (db.data.outbox || []).find((o: any) => o.id === m.lastInviteId);
-        if (msg) {
-          await dispatchOutboxEmail(db, msg, { googleAccessToken, senderEmail });
-          sentEmails.push(msg);
-        }
+      for (const msg of outboxItems) {
+        await dispatchOutboxEmail(msg, { googleAccessToken, senderEmail });
+        sentEmails.push(msg);
       }
-      saveDatabase(db);
+      const { outbox } = listMembersAndOutboxSql();
       res.status(201).json({
         invited,
         emailsSent: sentEmails,
-        outbox: db.data.outbox || [],
-        updatedAt: db.updatedAt,
+        outbox,
+        updatedAt,
       });
     } catch (err: any) {
       res.status(400).json({ error: err.message || 'Invalid invite payload' });
@@ -783,37 +714,38 @@ export function createApp() {
   });
 
   app.post('/api/members/:id/resend-invite', rateLimit(30, 60_000), async (req, res) => {
-    const m = (db.data.members || []).find((x: any) => x.id === req.params.id);
-    if (!m) {
+    const fallbackOrigin = `${req.protocol}://${req.get('host') || 'localhost:3000'}`;
+    const origin = sanitizeBaseUrl(req.body?.baseUrl, fallbackOrigin);
+    const created = createResendInviteSql(req.params.id, origin, safeString(req.body?.projectName, 120));
+    if (!created) {
       res.status(404).json({ error: 'Member not found' });
       return;
     }
-    const fallbackOrigin = `${req.protocol}://${req.get('host') || 'localhost:3000'}`;
-    const origin = sanitizeBaseUrl(req.body?.baseUrl, fallbackOrigin);
     const googleAccessToken =
       safeString(req.body?.googleAccessToken, 2048) ||
       (req.headers.authorization?.startsWith('Bearer ') ? req.headers.authorization.slice(7) : '');
     const senderEmail = sanitizeHeaderValue(req.body?.senderEmail, 150);
-    const msg = buildInvitationEmail(db.data, m, origin, safeString(req.body?.projectName, 120));
-    await dispatchOutboxEmail(db, msg, { googleAccessToken, senderEmail });
-    saveDatabase(db);
-    res.json({ ok: true, member: m, email: msg, outbox: db.data.outbox || [], updatedAt: db.updatedAt });
+    await dispatchOutboxEmail(created.email, { googleAccessToken, senderEmail });
+    const { outbox } = listMembersAndOutboxSql();
+    res.json({
+      ok: true,
+      member: created.member,
+      email: created.email,
+      outbox,
+      updatedAt: created.updatedAt,
+    });
   });
 
   app.post('/api/invites/accept', (req, res) => {
     const tokenOrEmail = safeString(req.body?.token || req.body?.email, 200).trim();
-    const member = acceptInviteTokenRecord(db.data, db.prefs, tokenOrEmail);
-    if (!member) {
+    const result = acceptInviteTokenSql(tokenOrEmail);
+    if (!result) {
       res.status(404).json({ error: 'Invitation not found or expired' });
       return;
     }
-    saveDatabase(db);
     res.json({
       ok: true,
-      member,
-      me: db.data.me,
-      prefs: db.prefs,
-      updatedAt: db.updatedAt,
+      ...result,
     });
   });
 
@@ -830,14 +762,13 @@ export function createApp() {
     const cleanPass = cleanHost.includes('gmail.com')
       ? safeString(pass, 255).replace(/\s+/g, '')
       : safeString(pass, 255).trim();
-    db.data.smtpConfig = {
+    saveSmtpConfigSql({
       host: cleanHost,
       port: cleanPort,
       user: cleanUser,
       pass: cleanPass,
       from: sanitizeHeaderValue(from || cleanUser, 150),
-    };
-    saveDatabase(db);
+    });
 
     let verified = false;
     let verifyError = '';
@@ -864,49 +795,26 @@ export function createApp() {
   });
 
   app.patch('/api/members/:id', (req, res) => {
-    const m = (db.data.members || []).find((x: any) => x.id === req.params.id);
-    if (!m) {
+    const result = patchMemberSql(req.params.id, req.body || {});
+    if (!result) {
       res.status(404).json({ error: 'Member not found' });
       return;
     }
-    const patch = stripDangerousKeys(req.body || {});
-    for (const k of Object.keys(patch)) {
-      if (!ALLOWED_MEMBER_PATCH_KEYS.has(k)) continue;
-      if (k === 'photoURL') {
-        const safePhoto = safeImageSrc(patch.photoURL);
-        m.photoURL = safePhoto || '';
-      } else if (k === 'c') {
-        m.c = safeCssColor(patch.c, m.c || '#5A67D8');
-      } else {
-        m[k] = safeString(patch[k], 200);
-      }
-    }
-    if (m.id === db.data.me) {
-      if (patch.name) db.prefs.name = m.name;
-      if (patch.title) db.prefs.title = m.title;
-    }
-    saveDatabase(db);
-    res.json({ member: m, updatedAt: db.updatedAt });
+    res.json(result);
   });
 
   app.delete('/api/members/:id', (req, res) => {
-    const ok = removeMemberRecord(db.data, req.params.id);
+    const { ok, updatedAt } = deleteMemberSql(req.params.id);
     if (!ok) {
       res.status(404).json({ error: 'Member not found' });
       return;
     }
-    saveDatabase(db);
-    res.json({ ok: true, updatedAt: db.updatedAt });
+    res.json({ ok: true, updatedAt });
   });
 
   // --- Files API ---
   app.get('/api/files', (req, res) => {
-    let files = [...(db.data.files || [])];
-    const projFilter = safeString(req.query.project, 80);
-    const typeFilter = safeString(req.query.type, 40);
-    if (projFilter) files = files.filter((f: any) => f.project === projFilter);
-    if (typeFilter && typeFilter !== 'all') files = files.filter((f: any) => f.type === typeFilter);
-    res.json({ files });
+    res.json({ files: listFilesSql(req.query as Record<string, any>) });
   });
 
   app.post('/api/files', (req, res) => {
@@ -914,134 +822,96 @@ export function createApp() {
       res.status(400).json({ error: 'File name is required' });
       return;
     }
-    const file = addFileRecord(db.data, req.body);
-    saveDatabase(db);
-    res.status(201).json({ file, updatedAt: db.updatedAt });
+    const result = insertFileSql(req.body);
+    res.status(201).json(result);
   });
 
   app.patch('/api/files/:id', (req, res) => {
-    const file = renameFileRecord(db.data, req.params.id, String(req.body?.name || ''));
-    if (!file) {
+    const result = renameFileSql(req.params.id, String(req.body?.name || ''));
+    if (!result) {
       res.status(404).json({ error: 'File not found or invalid name' });
       return;
     }
-    saveDatabase(db);
-    res.json({ file, updatedAt: db.updatedAt });
+    res.json(result);
   });
 
   app.post('/api/files/:id/duplicate', (req, res) => {
-    const file = duplicateFileRecord(db.data, req.params.id);
-    if (!file) {
+    const result = duplicateFileSql(req.params.id);
+    if (!result) {
       res.status(404).json({ error: 'File not found' });
       return;
     }
-    saveDatabase(db);
-    res.status(201).json({ file, updatedAt: db.updatedAt });
+    res.status(201).json(result);
   });
 
   app.delete('/api/files/:id', (req, res) => {
-    const ok = deleteFileRecord(db.data, req.params.id);
+    const { ok, updatedAt } = deleteFileSql(req.params.id);
     if (!ok) {
       res.status(404).json({ error: 'File not found' });
       return;
     }
-    saveDatabase(db);
-    res.json({ ok: true, updatedAt: db.updatedAt });
+    res.json({ ok: true, updatedAt });
   });
 
   // --- Notifications & Activity API ---
   app.get('/api/notifications', (_req, res) => {
-    res.json({ notifications: db.data.notifs || [] });
+    res.json({ notifications: listNotificationsSql() });
   });
 
   app.post('/api/notifications/:id/read', (req, res) => {
-    const n = (db.data.notifs || []).find((x: any) => x.id === req.params.id);
-    if (!n) {
+    const readFlag = typeof req.body?.read === 'boolean' ? req.body.read : true;
+    const result = markNotificationReadSql(req.params.id, readFlag);
+    if (!result) {
       res.status(404).json({ error: 'Notification not found' });
       return;
     }
-    n.read = typeof req.body?.read === 'boolean' ? req.body.read : true;
-    saveDatabase(db);
-    res.json({ notification: n, updatedAt: db.updatedAt });
+    res.json(result);
   });
 
   app.post('/api/notifications/read-all', (_req, res) => {
-    (db.data.notifs || []).forEach((n: any) => {
-      n.read = true;
-    });
-    saveDatabase(db);
-    res.json({ ok: true, updatedAt: db.updatedAt });
+    res.json(markAllNotificationsReadSql());
   });
 
   app.delete('/api/notifications/read', (_req, res) => {
-    db.data.notifs = (db.data.notifs || []).filter((n: any) => !n.read);
-    saveDatabase(db);
-    res.json({ ok: true, notifications: db.data.notifs, updatedAt: db.updatedAt });
+    const { notifications, updatedAt } = deleteReadNotificationsSql();
+    res.json({ ok: true, notifications, updatedAt });
   });
 
   app.get('/api/activity', (_req, res) => {
-    res.json({ activity: db.data.activity || [] });
+    res.json({ activity: listActivityLogsSql() });
   });
 
   // --- Saved Views, Preferences & Workspace ---
   app.post('/api/views', (req, res) => {
-    const sv = {
-      id: uid('v'),
-      project: req.body?.project || 'p1',
-      name: String(req.body?.name || 'Untitled view').trim(),
-      type: req.body?.type || 'list',
-      filters: Array.isArray(req.body?.filters) ? req.body.filters : [],
-    };
-    db.data.savedViews = db.data.savedViews || [];
-    db.data.savedViews.push(sv);
-    saveDatabase(db);
-    res.status(201).json({ view: sv, updatedAt: db.updatedAt });
+    const result = insertSavedViewSql(req.body || {});
+    res.status(201).json(result);
   });
 
   app.patch('/api/views/:id', (req, res) => {
-    const v = (db.data.savedViews || []).find((x: any) => x.id === req.params.id);
-    if (!v) {
+    const result = renameSavedViewSql(req.params.id, String(req.body?.name || ''));
+    if (!result) {
       res.status(404).json({ error: 'Saved view not found' });
       return;
     }
-    if (req.body?.name) v.name = String(req.body.name).trim();
-    saveDatabase(db);
-    res.json({ view: v, updatedAt: db.updatedAt });
+    res.json(result);
   });
 
   app.delete('/api/views/:id', (req, res) => {
-    db.data.savedViews = (db.data.savedViews || []).filter((x: any) => x.id !== req.params.id);
-    saveDatabase(db);
-    res.json({ ok: true, updatedAt: db.updatedAt });
+    res.json(deleteSavedViewSql(req.params.id));
   });
 
   app.patch('/api/preferences', (req, res) => {
     const { prefs, notifPrefs } = req.body || {};
-    if (prefs && typeof prefs === 'object') {
-      db.prefs = { ...db.prefs, ...prefs };
-    }
-    if (notifPrefs && typeof notifPrefs === 'object') {
-      db.data.notifPrefs = { ...db.data.notifPrefs, ...notifPrefs };
-    }
-    saveDatabase(db);
-    res.json({ prefs: db.prefs, notifPrefs: db.data.notifPrefs, updatedAt: db.updatedAt });
+    res.json(patchPreferencesSql(prefs, notifPrefs));
   });
 
   app.patch('/api/workspace', (req, res) => {
-    const { name, url, c, plan } = req.body || {};
+    const { name } = req.body || {};
     if (name !== undefined && !String(name).trim()) {
       res.status(400).json({ error: "Workspace name can't be empty" });
       return;
     }
-    const oldName = db.data.ws.name;
-    if (name) db.data.ws.name = String(name).trim();
-    if (url) db.data.ws.url = String(url).trim().toLowerCase().replace(/[^a-z0-9-]+/g, '-');
-    if (c) db.data.ws.c = c;
-    if (plan) db.data.plan = plan;
-    const w = (db.data.workspaces || []).find((x: any) => x.name === oldName);
-    if (w && name) w.name = db.data.ws.name;
-    saveDatabase(db);
-    res.json({ ws: db.data.ws, workspaces: db.data.workspaces, updatedAt: db.updatedAt });
+    res.json(patchWorkspaceSql(req.body || {}));
   });
 
   // --- Auth & Security API ---
@@ -1052,12 +922,11 @@ export function createApp() {
       return;
     }
     const email = String(req.body.email).trim();
-    const member = authenticateWorkspaceUser(db.data, db.prefs, {
+    const result = authenticateWorkspaceUserSql({
       email,
       name: req.body?.name,
     });
-    saveDatabase(db);
-    res.json({ ok: true, user: member, me: db.data.me, prefs: db.prefs, email });
+    res.json({ ok: true, ...result, email });
   });
 
   app.post('/api/auth/signup', (req, res) => {
@@ -1068,14 +937,11 @@ export function createApp() {
     }
     const email = String(req.body.email).trim();
     const name = String(req.body.name).trim();
-    const member = authenticateWorkspaceUser(db.data, db.prefs, { email, name });
-    saveDatabase(db);
+    const result = authenticateWorkspaceUserSql({ email, name });
     res.status(201).json({
       ok: true,
       status: 'verification_required',
-      user: member,
-      me: db.data.me,
-      prefs: db.prefs,
+      ...result,
       email,
     });
   });
@@ -1086,20 +952,16 @@ export function createApp() {
       res.status(400).json({ error: 'Valid Google account email is required' });
       return;
     }
-    const member = authenticateWorkspaceUser(db.data, db.prefs, {
+    const result = authenticateWorkspaceUserSql({
       uid: req.body?.uid,
       name: req.body?.name,
       email,
       photoURL: req.body?.photoURL,
       provider: 'Google',
     });
-    saveDatabase(db);
     res.json({
       ok: true,
-      user: member,
-      me: db.data.me,
-      prefs: db.prefs,
-      updatedAt: db.updatedAt,
+      ...result,
     });
   });
 
@@ -1136,21 +998,18 @@ export function createApp() {
       res.status(400).json({ error: 'Enter the 6-digit code from your app' });
       return;
     }
-    db.data.tfa = !!enabled;
-    saveDatabase(db);
-    res.json({ ok: true, tfa: db.data.tfa });
+    const { tfa, updatedAt } = setTwoFactorSql(Boolean(enabled));
+    res.json({ ok: true, tfa, updatedAt });
   });
 
   app.delete('/api/sessions/:id', (req, res) => {
-    db.data.sessions = (db.data.sessions || []).filter((s: any) => s.id !== req.params.id);
-    saveDatabase(db);
-    res.json({ ok: true, sessions: db.data.sessions });
+    const { sessions, updatedAt } = deleteSessionSql(req.params.id);
+    res.json({ ok: true, sessions, updatedAt });
   });
 
   app.delete('/api/sessions', (_req, res) => {
-    db.data.sessions = (db.data.sessions || []).filter((s: any) => s.cur);
-    saveDatabase(db);
-    res.json({ ok: true, sessions: db.data.sessions });
+    const { sessions, updatedAt } = deleteOtherSessionsSql();
+    res.json({ ok: true, sessions, updatedAt });
   });
 
   return app;

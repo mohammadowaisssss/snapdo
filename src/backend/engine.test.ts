@@ -739,7 +739,7 @@ test('Security Suite: XSS, SQLi/NoSQLi, Prototype Pollution, SSRF, Open Redirect
   }
 });
 
-test('Dockerization files (Dockerfile.backend, Dockerfile.ui, docker/nginx.conf, docker-compose.yml) are valid and complete', async () => {
+test('Dockerization files (Dockerfile.backend, Dockerfile.ui, docker/nginx.conf, docker-compose.yml) are valid and include PostgreSQL', async () => {
   const fs = await import('node:fs');
   const path = await import('node:path');
   const root = process.cwd();
@@ -761,11 +761,107 @@ test('Dockerization files (Dockerfile.backend, Dockerfile.ui, docker/nginx.conf,
   assert.ok(nginxConf.includes('try_files $uri $uri/ /index.html;'));
 
   const composeFile = fs.readFileSync(path.join(root, 'docker-compose.yml'), 'utf8');
+  assert.ok(composeFile.includes('image: postgres:16-alpine'));
+  assert.ok(composeFile.includes('snapsec_pgdata:/var/lib/postgresql/data'));
   assert.ok(composeFile.includes('dockerfile: Dockerfile.backend'));
   assert.ok(composeFile.includes('dockerfile: Dockerfile.ui'));
   assert.ok(composeFile.includes('snapsec_data:/app/data'));
   assert.ok(composeFile.includes('"3000:80"'));
 });
+
+test('Relational SQL Database Engine: WAL mode, Foreign Keys, B-tree Indexes, ACID Transactions, and Indexed SQL Queries', async () => {
+  const fs = await import('node:fs');
+  const { getSqliteConnection, SQLITE_DB_FILE } = await import('../db/index.ts');
+  const {
+    insertTaskSql,
+    queryTaskByIdSql,
+    queryTasksSql,
+    queryWorkspaceMetrics,
+    patchTaskSql,
+    deleteTasksSql,
+  } = await import('../db/repository.ts');
+
+  const conn = getSqliteConnection();
+
+  // 1. Verify WAL mode and foreign key constraints are active
+  const journalMode = String(conn.pragma('journal_mode', { simple: true }));
+  const foreignKeys = Number(conn.pragma('foreign_keys', { simple: true }));
+  assert.equal(journalMode.toLowerCase(), 'wal');
+  assert.equal(foreignKeys, 1);
+
+  // 2. Verify B-tree indexes exist on normalized SQL tables
+  const indexes = conn
+    .prepare("SELECT name, tbl_name FROM sqlite_master WHERE type = 'index' AND name LIKE 'idx_%'")
+    .all() as Array<{ name: string; tbl_name: string }>;
+  const indexNames = new Set(indexes.map(i => i.name));
+  assert.ok(indexNames.has('idx_tasks_proj_arch_order'), 'Missing B-tree index idx_tasks_proj_arch_order');
+  assert.ok(indexNames.has('idx_tasks_status'), 'Missing B-tree index idx_tasks_status');
+  assert.ok(indexNames.has('idx_tasks_assignee'), 'Missing B-tree index idx_tasks_assignee');
+  assert.ok(indexNames.has('idx_tasks_priority'), 'Missing B-tree index idx_tasks_priority');
+  assert.ok(indexNames.has('idx_tasks_due'), 'Missing B-tree index idx_tasks_due');
+  assert.ok(indexNames.has('idx_subtasks_task'), 'Missing B-tree index idx_subtasks_task');
+  assert.ok(indexNames.has('idx_comments_task'), 'Missing B-tree index idx_comments_task');
+  assert.ok(indexNames.has('idx_files_project_type'), 'Missing B-tree index idx_files_project_type');
+
+  // 3. Verify EXPLAIN QUERY PLAN uses B-tree index instead of full table scan on indexed columns
+  const planRows = conn
+    .prepare("EXPLAIN QUERY PLAN SELECT * FROM tasks WHERE project_id = 'p1' AND archived = 0 ORDER BY sort_order ASC")
+    .all() as Array<{ detail: string }>;
+  const planDetail = planRows.map(r => r.detail).join(' ');
+  assert.ok(
+    planDetail.includes('idx_tasks_proj_arch_order') || planDetail.includes('SEARCH'),
+    `Expected B-tree index usage in query plan, got: ${planDetail}`,
+  );
+
+  // 4. Verify row-level SQL CRUD and indexed SQL filtering without in-memory full-array scan
+  const createdRes = insertTaskSql({
+    title: 'Verify ACID SQL Transaction & B-Tree Index',
+    project: 'p1',
+    status: 'progress',
+    priority: 'urgent',
+    assignee: 'm1',
+    due: '2026-12-01',
+    subtasks: [{ id: 's-sql-1', title: 'Confirm WAL pragma', done: true }],
+  });
+  const created = createdRes.task;
+  assert.ok(created.id);
+  assert.equal(created.subtasks.length, 1);
+
+  const fetched = queryTaskByIdSql(created.id);
+  assert.ok(fetched);
+  assert.equal(fetched.title, 'Verify ACID SQL Transaction & B-Tree Index');
+  assert.equal(fetched.subtasks[0].done, true);
+
+  const filtered = queryTasksSql({ project: 'p1', status: 'progress', priority: 'urgent', q: 'ACID SQL' });
+  assert.equal(filtered.length, 1);
+  assert.equal(filtered[0].id, created.id);
+
+  // Patch via ACID transaction and verify SQL aggregation metrics
+  const patched = patchTaskSql(created.id, { status: 'done' });
+  assert.ok(patched);
+  assert.equal(patched.task.status, 'done');
+
+  const metrics = queryWorkspaceMetrics();
+  assert.equal(metrics.workspaceName, 'Snapsec');
+  assert.ok(metrics.completedTasks >= 1);
+
+  // Cleanup test row and temporary test sqlite database files
+  const delRes = deleteTasksSql([created.id]);
+  assert.equal(delRes.deleted, 1);
+  assert.equal(queryTaskByIdSql(created.id), null);
+
+  if (SQLITE_DB_FILE.includes('snapsec-test-')) {
+    try {
+      conn.close();
+      for (const suffix of ['', '-wal', '-shm']) {
+        if (fs.existsSync(SQLITE_DB_FILE + suffix)) fs.unlinkSync(SQLITE_DB_FILE + suffix);
+      }
+    } catch {
+      // Ignore cleanup errors
+    }
+  }
+});
+
 
 
 

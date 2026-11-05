@@ -2,6 +2,7 @@
 import { $, $$, addD, diffD, fmtDate, iso, parse } from '../core/utils.js';
 import { PR, ST } from '../core/constants.js';
 import { D, S, proj, save, task } from '../core/store.js';
+import { api } from '../core/api.js';
 import { mutate, toast } from '../ui/toast.js';
 import { fxSet, render } from '../shell/render.js';
 import { viewOf } from '../shell/view-engine.js';
@@ -156,7 +157,8 @@ document.addEventListener('drop', e => {
     fxSet({ moved: t.id });
     mutate(() => {
       t.order = order;
-      if (moved) applyPatch(t, { status: d.col });
+      if (moved) applyPatch(t, { status: d.col, order });
+      else api.updateTask(t.id, { order });
     });
     if (moved) toast(`Moved “${t.title}” to ${ST[d.col].name}`, { ms: 2200 });
   } else if (d.type === 'row' && d.target) {
@@ -170,7 +172,7 @@ document.addEventListener('drop', e => {
     const i = all.findIndex(x => x.id === tg.id);
     const nb = d.pos === 'before' ? all[i - 1] : all[i + 1];
     const order = nb ? (tg.order + nb.order) / 2 : tg.order + (d.pos === 'before' ? -1 : 1);
-    const patch = {};
+    const patch = { order };
     if (v && d.group) {
       const g = v.group;
       if (g === 'status' && ST[d.group]) patch.status = d.group;
@@ -199,6 +201,7 @@ document.addEventListener('drop', e => {
     const o = D().projOrder.filter(x => x !== d.id);
     o.splice(o.indexOf(d.before), 0, d.id);
     D().projOrder = o;
+    api.reorderProjects(o);
     save();
     render();
   }

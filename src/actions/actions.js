@@ -171,6 +171,9 @@ export function createTask(f) {
   D().tasks.push(t);
   fxSet({ added: t.id });
   logAct('created', t);
+  if (!S.ui.offline && !f._skipApi) {
+    api.createTask(t).catch(() => {});
+  }
   return t;
 }
 export const RECUR_DAYS = { Daily: 1, Weekly: 7, 'Every 2 weeks': 14, Monthly: 30 };
@@ -220,6 +223,9 @@ export function applyPatch(t, patch) {
     else if (k === 'deps') logAct('updated dependencies of', t);
     t.updated = Date.now();
   }
+  if (!S.ui.offline && t?.id) {
+    api.updateTask(t.id, patch).catch(() => {});
+  }
   return msgs;
 }
 export function updateTask(id, patch) {
@@ -248,6 +254,9 @@ export function snapshot() {
 export function restore(snap) {
   S.data = JSON.parse(snap);
   save();
+  if (!S.ui.offline) {
+    api.syncState({ data: S.data, prefs: S.prefs, views: S.views, collapsed: S.ui.collapsed }).catch(() => {});
+  }
   render();
 }
 export async function copy(text, msg = 'Link copied') {
@@ -349,19 +358,19 @@ A.goFilteredList = el => {
 /* ---------- theme ---------- */
 A.setTheme = el => {
   S.prefs.theme = el.dataset.v;
-  save();
+  save(true);
   render();
 };
 A.toggleDark = () => {
   S.prefs.theme = effectiveDark() ? 'light' : 'dark';
-  save();
+  save(true);
   S.ui.palette = null;
   render();
   toast(effectiveDark() ? 'Dark mode on' : 'Light mode on', { kind: 'info', ms: 1800 });
 };
 A.setPref = el => {
   S.prefs[el.dataset.k] = el.dataset.v;
-  save();
+  save(true);
   render();
 };
 
@@ -403,6 +412,7 @@ A.popPick = el => {
         t,
         k === 'assignee' ? (v ? `to ${mem(v).name}` : '(unassigned)') : v ? fmtDate(v) : '(cleared)',
       );
+      api.updateSubtask(t.id, sb.id, { [k]: v }).catch(() => {});
     });
     return;
   }
@@ -419,6 +429,7 @@ A.popPick = el => {
         at: Date.now(),
         extra: 'to ' + PSTAT[v].name,
       });
+      api.updateProject(pr.id, { status: v }).catch(() => {});
     });
     S.ui.pop = null;
     render();
@@ -429,6 +440,7 @@ A.popPick = el => {
     const m = mem(p.id);
     mutate(() => {
       m.role = v;
+      api.updateMember(m.id, { role: v }).catch(() => {});
     });
     S.ui.pop = null;
     render();
@@ -530,6 +542,7 @@ A._projMove = (el, d) => {
   [o[a], o[b]] = [o[b], o[a]];
   S.ui.pop = null;
   save();
+  api.reorderProjects(o).catch(() => {});
   render();
   toast(`Moved ${proj(el.dataset.id).name} ${d < 0 ? 'up' : 'down'}`, { ms: 1600 });
 };
@@ -549,6 +562,7 @@ A.toggleFavTask = el => {
   const t = task(el.dataset.id);
   mutate(() => {
     t.fav = !t.fav;
+    api.updateTask(t.id, { fav: t.fav }).catch(() => {});
   });
   S.ui.pop = null;
   toast(t.fav ? 'Added to favorites' : 'Removed from favorites', { ms: 1800 });
@@ -558,6 +572,7 @@ A.toggleFavProj = el => {
   const p = proj(el.dataset.id);
   mutate(() => {
     p.fav = !p.fav;
+    api.updateProject(p.id, { fav: p.fav }).catch(() => {});
   });
   S.ui.pop = null;
   render();
@@ -604,6 +619,7 @@ A.archiveTask = el => {
     t.archived = true;
     t.archivedAt = Date.now();
     logAct('archived', t);
+    api.archiveTask(t.id).catch(() => {});
   });
   toast(`Archived “${t.title}”`, { action: 'Undo', onAction: () => restore(snap) });
 };
@@ -614,6 +630,10 @@ export function deleteTasks(ids) {
   D().comments = D().comments.filter(c => !set.has(c.task));
   if (set.has(S.ui.drawer)) S.ui.drawer = null;
   ids.forEach(i => S.ui.sel.delete(i));
+  if (!S.ui.offline && ids.length) {
+    if (ids.length === 1) api.deleteTask(ids[0]).catch(() => {});
+    else api.bulkTasks({ ids, action: 'delete' }).catch(() => {});
+  }
 }
 A.delTask = el => {
   const t = task(el.dataset.id);
@@ -814,6 +834,7 @@ A.submitTask = () => {
             D().files.unshift({ ...x, project: t.project, task: t.id });
           }
         });
+        api.updateTask(t.id, { ...base, desc: t.desc, attachments: t.attachments }).catch(() => {});
       })
     )
       return;
@@ -930,12 +951,15 @@ A.toggleSub = el => {
   mutate(() => {
     s.done = !s.done;
     logAct(s.done ? 'completed subtask on' : 'reopened subtask on', t, `“${s.title}”`);
+    api.updateSubtask(t.id, s.id, { done: s.done }).catch(() => {});
   });
 };
 A.rmSub = el => {
   const t = task(el.dataset.id);
+  const sid = el.dataset.sid;
   mutate(() => {
-    t.subtasks = t.subtasks.filter(x => x.id !== el.dataset.sid);
+    t.subtasks = t.subtasks.filter(x => x.id !== sid);
+    api.deleteSubtask(t.id, sid).catch(() => {});
   });
 };
 KEY.addSub = el => {
@@ -947,6 +971,7 @@ KEY.addSub = el => {
   mutate(() => {
     t.subtasks.push({ id: nid, title: v, done: false });
     logAct('added subtask to', t, `“${v}”`);
+    api.updateTask(t.id, { subtasks: t.subtasks }).catch(() => {});
   });
   setTimeout(() => $('#d-sub')?.focus(), 0);
 };
@@ -958,10 +983,13 @@ A.expandRow = el => {
 /* attachments */
 A.rmAttach = el => {
   const t = task(el.dataset.id);
-  const f = t.attachments.find(a => a.id === el.dataset.aid);
+  const aid = el.dataset.aid;
+  const f = t.attachments.find(a => a.id === aid);
   mutate(() => {
-    t.attachments = t.attachments.filter(a => a.id !== el.dataset.aid);
+    t.attachments = t.attachments.filter(a => a.id !== aid);
+    D().files = (D().files || []).filter(x => x.id !== aid);
     logAct('removed a file from', t);
+    api.deleteFile(aid).catch(() => {});
   });
   if (f) toast(`Removed ${f.name}`);
 };
@@ -1213,9 +1241,11 @@ A.postComment = el => {
 };
 A.delComment = el => {
   const c = D().comments.find(x => x.id === el.dataset.id);
+  if (!c) return;
   const snap = snapshot();
   mutate(() => {
     D().comments = D().comments.filter(x => x !== c);
+    api.deleteComment(c.id).catch(() => {});
   });
   toast('Comment deleted', { action: 'Undo', onAction: () => restore(snap) });
 };
@@ -1227,6 +1257,7 @@ A.react = el => {
     c.re = c.re || {};
     const l = c.re[e] || [];
     c.re[e] = l.includes(D().me) ? l.filter(x => x !== D().me) : [...l, D().me];
+    api.toggleReaction(c.id, e, D().me).catch(() => {});
   });
 };
 
@@ -1242,6 +1273,7 @@ function syncTextareaState(ta) {
       t.desc = ta.value;
       t.updated = Date.now();
       save();
+      api.updateTask(t.id, { desc: t.desc }).catch(() => {});
     }
   } else if (inType === 'form' && ta.dataset.f) {
     S.ui.form[ta.dataset.f] = ta.value;
@@ -1253,6 +1285,7 @@ function syncTextareaState(ta) {
     if (s) {
       s.note = ta.value;
       save();
+      api.updateSubtask(t.id, s.id, { note: s.note }).catch(() => {});
     }
   }
 }
@@ -1316,6 +1349,7 @@ A.finishTaskDesc = el => {
     t.desc = ta.value;
     t.updated = Date.now();
     save();
+    api.updateTask(t.id, { desc: t.desc }).catch(() => {});
   }
   S.ui.descEdit = null;
   S.ui.editDesc = null;
@@ -1328,6 +1362,7 @@ IN.taskDesc = el => {
     t.desc = el.value;
     t.updated = Date.now();
     save();
+    api.updateTask(t.id, { desc: t.desc }).catch(() => {});
   }
   if (el.dataset.autosize != null) autosize(el);
 };
@@ -1486,6 +1521,7 @@ A.saveViewSubmit = () => {
   const sv = { id: uid('v'), project: m.pid, name, type, filters: JSON.parse(JSON.stringify(viewOf('p:' + m.pid).filters)) };
   D().savedViews.push(sv);
   save();
+  api.createView(sv).catch(() => {});
   S.ui.modals.pop();
   go('project', { id: m.pid, tab: 'v:' + sv.id }, { tab: true });
   toast(`Saved view “${name}”`);
@@ -1502,6 +1538,7 @@ A.renameView = el => {
       if (val) {
         v.name = val;
         save();
+        api.renameView(v.id, val).catch(() => {});
       }
     },
   });
@@ -1511,6 +1548,7 @@ A.delView = el => {
   S.ui.pop = null;
   D().savedViews = D().savedViews.filter(x => x !== v);
   save();
+  api.deleteView(v.id).catch(() => {});
   if (S.ui.params.tab === 'v:' + v.id) go('project', { id: v.project, tab: 'list' }, { tab: true });
   else render();
   toast(`Deleted view “${v.name}”`);
@@ -1552,12 +1590,13 @@ A.colArchive = () => {
   S.ui.pop = null;
   const snap = snapshot();
   if (
-    mutate(() =>
+    mutate(() => {
       ts.forEach(t => {
         t.archived = true;
         t.archivedAt = Date.now();
-      }),
-    )
+        api.archiveTask(t.id).catch(() => {});
+      });
+    })
   )
     toast(`Archived ${ts.length} completed tasks`, { action: 'Undo', onAction: () => restore(snap) });
 };
@@ -1565,7 +1604,12 @@ A.colSortPrio = el => {
   const ts = colTasks(S.ui.pop.key, el.dataset.id).sort((a, b) => PR[b.priority].w - PR[a.priority].w);
   const base = Math.min(...ts.map(t => t.order));
   S.ui.pop = null;
-  mutate(() => ts.forEach((t, i) => (t.order = base + i * 0.001)));
+  mutate(() =>
+    ts.forEach((t, i) => {
+      t.order = base + i * 0.001;
+      api.updateTask(t.id, { order: t.order }).catch(() => {});
+    }),
+  );
 };
 
 /* calendar & timeline */
@@ -1668,6 +1712,9 @@ export function createProject(f, tmplId) {
   D().projects.push(p);
   D().projOrder.unshift(p.id);
   D().activity.unshift({ id: uid('a'), by: D().me, verb: 'created project', task: null, project: p.id, at: Date.now(), extra: '' });
+  if (!S.ui.offline) {
+    api.createProject({ ...p, tmpl: 'blank' }).catch(() => {});
+  }
   const tm = TEMPLATES.find(t => t.id === tmplId);
   (tm?.tasks || []).forEach((title, i) =>
     createTask({
@@ -1696,7 +1743,7 @@ A.submitProject = () => {
   if (m.edit) {
     const p = proj(m.edit);
     if (
-      mutate(() =>
+      mutate(() => {
         Object.assign(p, {
           name: f.name,
           desc: f.desc,
@@ -1706,8 +1753,18 @@ A.submitProject = () => {
           lead: f.lead,
           due: f.due,
           members: [...new Set([...p.members, f.lead])],
-        }),
-      )
+        });
+        api.updateProject(p.id, {
+          name: p.name,
+          desc: p.desc,
+          icon: p.icon,
+          color: p.color,
+          team: p.team,
+          lead: p.lead,
+          due: p.due,
+          members: p.members,
+        }).catch(() => {});
+      })
     ) {
       S.ui.modals.pop();
       render();
@@ -1750,6 +1807,7 @@ A.archiveProject = el => {
         mutate(() => {
           p.archived = true;
           p.archivedAt = Date.now();
+          api.archiveProject(p.id).catch(() => {});
         })
       ) {
         if (S.ui.route === 'project' && S.ui.params.id === p.id) go('projects');
@@ -1763,6 +1821,7 @@ A.restoreProject = el => {
   mutate(() => {
     p.archived = false;
     p.archivedAt = null;
+    api.restoreProject(p.id).catch(() => {});
   });
   toast(`Restored ${p.name}`);
 };
@@ -1788,6 +1847,7 @@ A.delProject = el => {
           D().projects = D().projects.filter(x => x !== p);
           D().projOrder = D().projOrder.filter(x => x !== p.id);
           D().files = D().files.filter(f => f.project !== p.id);
+          api.deleteProject(p.id).catch(() => {});
         })
       ) {
         if (S.ui.route === 'project' && S.ui.params.id === p.id) go('projects');
@@ -1817,6 +1877,7 @@ A.shareAdd = el => {
   const m = mem(el.dataset.mid);
   mutate(() => {
     p.members.push(m.id);
+    api.updateProject(p.id, { members: p.members }).catch(() => {});
   });
   S.ui.shareQ = '';
   render();
@@ -1958,12 +2019,14 @@ IN.sharePerm = el => {
     const snap = snapshot();
     mutate(() => {
       p.members = p.members.filter(x => x !== mid);
+      api.updateProject(p.id, { members: p.members }).catch(() => {});
     });
     toast(`Removed ${mem(mid).name}`, { action: 'Undo', onAction: () => restore(snap) });
   } else {
     mutate(() => {
       p.perms = p.perms || {};
       p.perms[mid] = el.value;
+      api.updateProject(p.id, { perms: p.perms }).catch(() => {});
     });
     toast(`${mem(mid).name}: ${el.value}`, { ms: 1800 });
   }
@@ -1972,6 +2035,7 @@ IN.shareAccess = el => {
   const p = proj(el.dataset.id);
   mutate(() => {
     p.access = el.value;
+    api.updateProject(p.id, { access: p.access }).catch(() => {});
   });
 };
 A.invite = () => {
@@ -2290,6 +2354,7 @@ A.removeMember = el => {
             if (t.assignee === m.id) t.assignee = null;
           });
           D().projects.forEach(p => (p.members = p.members.filter(x => x !== m.id)));
+          api.removeMember(m.id).catch(() => {});
         })
       ) {
         if (S.ui.route === 'member') go('members');
@@ -2333,6 +2398,7 @@ A.renameFile = el => {
         mutate(() => {
           f.name = v;
           f.type = fileType(v);
+          api.renameFile(f.id, v).catch(() => {});
         });
     },
   });
@@ -2342,7 +2408,9 @@ A.dupFile = el => {
   S.ui.pop = null;
   mutate(() => {
     const i = D().files.indexOf(f);
-    D().files.splice(i + 1, 0, { ...f, id: uid('f'), name: f.name.replace(/(\.[^.]+)$/, ' copy$1'), at: Date.now(), by: D().me });
+    const copy = { ...f, id: uid('f'), name: f.name.replace(/(\.[^.]+)$/, ' copy$1'), at: Date.now(), by: D().me };
+    D().files.splice(i + 1, 0, copy);
+    api.uploadFile(copy).catch(() => {});
   });
   toast('File duplicated');
 };
@@ -2360,6 +2428,7 @@ A.delFile = el => {
         mutate(() => {
           D().files = D().files.filter(x => x !== f);
           if (f.task && task(f.task)) task(f.task).attachments = task(f.task).attachments.filter(a => a.name !== f.name);
+          api.deleteFile(f.id).catch(() => {});
         })
       )
         toast(`Deleted ${f.name}`, { action: 'Undo', onAction: () => restore(snap) });
@@ -2373,18 +2442,21 @@ A.selNotif = el => {
   n.read = true;
   S.ui.inboxSel = n.id;
   save();
+  api.markNotifRead(n.id, true).catch(() => {});
   render();
 };
 A.toggleRead = el => {
   const n = D().notifs.find(x => x.id === el.dataset.id);
   n.read = !n.read;
   save();
+  api.markNotifRead(n.id, n.read).catch(() => {});
   render();
 };
 A.markAllRead = () => {
   const n = D().notifs.filter(x => !x.read).length;
   D().notifs.forEach(x => (x.read = true));
   save();
+  api.markAllNotifsRead().catch(() => {});
   render();
   if (n) toast("You're all caught up.");
 };
@@ -2396,6 +2468,7 @@ A.openNotif = el => {
   const n = D().notifs.find(x => x.id === el.dataset.id);
   n.read = true;
   save();
+  api.markNotifRead(n.id, true).catch(() => {});
   if (n.task) A.openTask({ dataset: { id: n.task } });
   else if (n.project) go('project', { id: n.project, tab: 'overview' });
 };
@@ -2583,23 +2656,24 @@ IN.noop = () => {};
 /* settings */
 IN.prefToggle = el => {
   S.prefs[el.dataset.k] = el.checked;
-  save();
+  save(true);
 };
 IN.npToggle = el => {
   D().notifPrefs[el.dataset.k] = el.checked;
-  save();
+  save(true);
   toast('Notification preferences saved', { ms: 1500 });
 };
 IN.prefSel = el => {
   const k = el.dataset.k;
   S.prefs[k] = k === 'weekStart' ? +el.value : el.value;
-  save();
+  save(true);
   render();
   toast('Preference saved', { ms: 1500 });
 };
 A.wsColor = el => {
   D().ws.c = el.dataset.v;
   save();
+  api.updateWorkspace({ c: D().ws.c }).catch(() => {});
   render();
 };
 A.saveWorkspace = () => {
@@ -2620,6 +2694,7 @@ A.saveWorkspace = () => {
         D().ws.url = u || D().ws.url;
         const w = D().workspaces.find(x => x.name === old);
         if (w) w.name = n;
+        api.updateWorkspace({ name: D().ws.name, url: D().ws.url, c: D().ws.c }).catch(() => {});
       })
     )
       toast('Workspace settings saved');
@@ -2635,6 +2710,7 @@ A.delWorkspace = () =>
     run: () => {
       S.data = seed();
       S.views = {};
+      api.resetWorkspace().catch(() => {});
       save();
       S.ui.auth = 'login';
       render();
@@ -2644,6 +2720,7 @@ A.delWorkspace = () =>
 A.avColor = el => {
   me().c = el.dataset.v;
   save();
+  api.updateMember(me().id, { c: me().c }).catch(() => {});
   render();
 };
 A.saveProfile = () => {
@@ -2662,6 +2739,8 @@ A.saveProfile = () => {
         S.prefs.title = tt;
         me().name = n;
         me().title = tt;
+        api.updateMember(me().id, { name: n, title: tt }).catch(() => {});
+        api.updatePreferences({ prefs: S.prefs }).catch(() => {});
       })
     )
       toast('Profile updated');

@@ -97,7 +97,7 @@ export const S = {
   },
 };
 export let _saveT;
-export function save() {
+export function save(syncPrefsOnly = false) {
   _localMutCount++;
   const payload = { data: S.data, prefs: S.prefs, views: S.views, collapsed: S.ui.collapsed };
   try {
@@ -105,18 +105,15 @@ export function save() {
   } catch {
     /* storage full or blocked: keep working in memory */
   }
-  if (!S.ui.offline && typeof fetch !== 'undefined') {
-    api.syncState(payload).catch(() => {
-      /* offline or network error: local state remains cached */
-    });
+  if (syncPrefsOnly && !S.ui.offline && typeof fetch !== 'undefined') {
+    api.updatePreferences({ prefs: S.prefs, notifPrefs: S.data?.notifPrefs }).catch(() => {});
   }
 }
 
 export async function hydrateFromBackend(onHydrated) {
   try {
-    const snapCount = _localMutCount;
     const remote = await api.bootstrap();
-    if (_localMutCount === snapCount && remote && remote.data && Array.isArray(remote.data.tasks)) {
+    if (remote && remote.data && Array.isArray(remote.data.tasks)) {
       cleanLegacyStore(remote);
       S.data = remote.data;
       S.prefs = Object.assign({}, DEFAULT_PREFS, remote.prefs || {});
