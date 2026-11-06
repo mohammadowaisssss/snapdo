@@ -944,19 +944,303 @@ test('Relational SQL Database Engine: WAL mode, Foreign Keys, B-tree Indexes, AC
   assert.equal(metrics.workspaceName, 'Snapsec');
   assert.ok(metrics.completedTasks >= 1);
 
-  // Cleanup test row and temporary test sqlite database files
+  // Cleanup test row
   const delRes = deleteTasksSql([created.id]);
   assert.equal(delRes.deleted, 1);
   assert.equal(queryTaskByIdSql(created.id), null);
+});
 
-  if (SQLITE_DB_FILE.includes('snapsec-test-')) {
-    try {
-      conn.close();
-      for (const suffix of ['', '-wal', '-shm']) {
-        if (fs.existsSync(SQLITE_DB_FILE + suffix)) fs.unlinkSync(SQLITE_DB_FILE + suffix);
-      }
-    } catch {
-      // Ignore cleanup errors
-    }
+test('Frontend & Backend Auth Guard: puts all workspace pages behind auth check, validates JWT expiration, and redirects unauthenticated/expired users to login', async () => {
+  const { generateAuthToken, verifyAuthToken } = await import('./services/token.ts');
+  const { PUBLIC_AUTH_ROUTES, isPublicAuthRoute, isTokenValid } = await import('../../frontend/src/core/auth.js');
+
+  // 1. Verify Public vs Protected routes
+  const publicRoutes = ['login', 'signup', 'forgot', 'forgot-sent', 'reset', 'reset-done', 'verify', 'onboarding'];
+  for (const r of publicRoutes) {
+    assert.equal(PUBLIC_AUTH_ROUTES.has(r), true, `Route '${r}' should be public in PUBLIC_AUTH_ROUTES`);
+    assert.equal(isPublicAuthRoute(r), true, `isPublicAuthRoute('${r}') should return true`);
+    assert.equal(isPublicAuthRoute(`#${r}`), true, `isPublicAuthRoute('#${r}') should return true`);
+  }
+
+  const protectedWorkspaceRoutes = [
+    'home',
+    'inbox',
+    'mytasks',
+    'favorites',
+    'notifications',
+    'search',
+    'overview',
+    'projects',
+    'project',
+    'tasks',
+    'calendar',
+    'timeline',
+    'members',
+    'member',
+    'teams',
+    'team',
+    'activity',
+    'settings',
+    'system',
+    'states',
+    'archive',
+  ];
+  for (const r of protectedWorkspaceRoutes) {
+    assert.equal(PUBLIC_AUTH_ROUTES.has(r), false, `Workspace route '${r}' MUST NOT be public`);
+    assert.equal(isPublicAuthRoute(r), false, `isPublicAuthRoute('${r}') MUST return false for protected page`);
+  }
+
+  // 2. Verify Token Generation & Expiration Checking
+  const validUser = { id: 'm1', email: 'mohammadowais616@gmail.com', name: 'Mohammad Owais' };
+  const { token: validToken, expiresAt } = generateAuthToken(validUser, true);
+  assert.ok(validToken && typeof validToken === 'string');
+  assert.ok(expiresAt > Date.now());
+
+  // Client validation of valid token
+  assert.equal(isTokenValid(validToken), true, 'Valid JWT should pass client isTokenValid');
+
+  // Server validation of valid token
+  const serverVerify = verifyAuthToken(validToken);
+  assert.equal(serverVerify.valid, true);
+  assert.equal(serverVerify.payload?.email, 'mohammadowais616@gmail.com');
+
+  // Client and server validation of expired token
+  const expiredPayload = {
+    email: 'mohammadowais616@gmail.com',
+    name: 'Mohammad Owais',
+    sub: 'm1',
+    iat: Math.floor(Date.now() / 1000) - 7200,
+    exp: Math.floor(Date.now() / 1000) - 3600, // Expired 1 hour ago
+  };
+  const crypto = await import('node:crypto');
+  const hB64 = Buffer.from(JSON.stringify({ alg: 'HS256', typ: 'JWT' })).toString('base64url');
+  const pB64 = Buffer.from(JSON.stringify(expiredPayload)).toString('base64url');
+  const secret = process.env.JWT_SECRET || 'snapsec_super_secret_jwt_key_2026_production';
+  const sig = crypto.createHmac('sha256', secret).update(`${hB64}.${pB64}`).digest('base64url');
+  const expiredToken = `${hB64}.${pB64}.${sig}`;
+
+  assert.equal(isTokenValid(expiredToken), false, 'Expired token MUST fail client isTokenValid');
+  const serverExpiredVerify = verifyAuthToken(expiredToken);
+  assert.equal(serverExpiredVerify.valid, false);
+  assert.equal(serverExpiredVerify.reason, 'Token has expired');
+
+  // Tampered token check
+  const tamperedToken = `${hB64}.${pB64}.invalidsignature123`;
+  assert.equal(verifyAuthToken(tamperedToken).valid, false);
+
+  // 3. Verify Express REST Auth & /api/auth/me session check endpoint
+  process.env.NODE_ENV = 'test';
+  const { createApp } = await import('./app.ts');
+  const app = createApp();
+  const server = await new Promise<any>(resolve => {
+    const s = app.listen(0, '127.0.0.1', () => resolve(s));
+  });
+  const base = `http://127.0.0.1:${server.address().port}`;
+
+  try {
+    // Unauthenticated request to /api/auth/me -> 401
+    const unauthRes = await fetch(`${base}/api/auth/me`);
+    assert.equal(unauthRes.status, 401);
+    const unauthData = await unauthRes.json();
+    assert.ok(unauthData.error);
+
+    // Request with expired token to /api/auth/me -> 401
+    const expiredRes = await fetch(`${base}/api/auth/me`, {
+      headers: { Authorization: `Bearer ${expiredToken}` },
+    });
+    assert.equal(expiredRes.status, 401);
+
+    // Authenticated request to /api/auth/me with valid Bearer token -> 200
+    const authRes = await fetch(`${base}/api/auth/me`, {
+      headers: { Authorization: `Bearer ${validToken}` },
+    });
+    assert.equal(authRes.status, 200);
+    const authData = await authRes.json();
+    assert.equal(authData.ok, true);
+    assert.equal(authData.user.email, 'mohammadowais616@gmail.com');
+
+    // Login endpoint issues token and expiration
+    const loginRes = await fetch(`${base}/api/auth/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email: 'mohammadowais616@gmail.com', password: 'AnyPassword123!' }),
+    });
+    assert.equal(loginRes.status, 200);
+    const loginData = await loginRes.json();
+    assert.ok(loginData.token, 'Login response must provide signed JWT token');
+    assert.ok(loginData.expiresAt > Date.now(), 'Login response must provide future expiresAt timestamp');
+    assert.equal(isTokenValid(loginData.token), true, 'Returned login token must pass client validation');
+  } finally {
+    server.close();
   }
 });
+
+test('SMTP configuration resolution and mailer utilization for verification & password reset links', async () => {
+  const { getActiveSmtpConfig, dispatchOutboxEmail } = await import('./services/mailer.ts');
+  const {
+    saveSmtpConfigSql,
+    getSmtpConfigSql,
+    signupUserSql,
+    verifyEmailTokenSql,
+    resendVerificationEmailSql,
+    getOutboxEmailsSql,
+  } = await import('./db/repository.ts');
+  const { createApp } = await import('./app.ts');
+
+  // 1. Verify getActiveSmtpConfig priority: env vars vs database
+  const originalEnv = { ...process.env };
+  try {
+    // Test env var resolution
+    process.env.SMTP_HOST = 'smtp.testdomain.com';
+    process.env.SMTP_PORT = '587';
+    process.env.SMTP_USER = 'notifications@testdomain.com';
+    process.env.SMTP_PASS = 'secret_pass_123';
+    process.env.SMTP_FROM = 'Snapsec Security <noreply@testdomain.com>';
+
+    const envSmtp = getActiveSmtpConfig();
+    assert.equal(envSmtp.host, 'smtp.testdomain.com');
+    assert.equal(envSmtp.port, 587);
+    assert.equal(envSmtp.user, 'notifications@testdomain.com');
+    assert.equal(envSmtp.from, 'Snapsec Security <noreply@testdomain.com>');
+    assert.equal(envSmtp.configured, true);
+
+    // Test database persistence overrides or supplements env
+    saveSmtpConfigSql({
+      host: 'mail.custom-relay.org',
+      port: 465,
+      user: 'ops@custom-relay.org',
+      pass: 'custom_pass_456',
+      from: 'Custom Relay <ops@custom-relay.org>',
+    });
+
+    const dbSmtp = getActiveSmtpConfig();
+    assert.equal(dbSmtp.host, 'mail.custom-relay.org');
+    assert.equal(dbSmtp.port, 465);
+    assert.equal(dbSmtp.user, 'ops@custom-relay.org');
+    assert.equal(dbSmtp.configured, true);
+  } finally {
+    process.env = originalEnv;
+  }
+
+  // 2. Test signup creates verification token, verification URL, and outbox record
+  const uniqueEmail = `qa-verify-${Date.now()}@snapsec-test.co`;
+  const signupResult = signupUserSql({
+    name: 'Verification QA User',
+    email: uniqueEmail,
+    password: 'ValidPassword123!',
+    baseUrl: 'https://todo.snapsec.co',
+  });
+  assert.equal(signupResult.ok, true);
+  assert.ok(signupResult.verifyToken, 'Signup MUST generate a verifyToken');
+  assert.ok(signupResult.verifyUrl, 'Signup MUST generate a verifyUrl');
+  assert.ok(
+    signupResult.verifyUrl.includes(`?verify=${encodeURIComponent(signupResult.verifyToken!)}`),
+    'Verification URL must include verify query parameter with token',
+  );
+  assert.ok(
+    signupResult.verifyUrl.includes(`email=${encodeURIComponent(uniqueEmail)}`),
+    'Verification URL must include recipient email',
+  );
+  assert.ok(signupResult.outboxItem, 'Signup MUST generate an outbox email record');
+  assert.ok(
+    (signupResult.outboxItem.html || '').includes(signupResult.verifyUrl) ||
+      (signupResult.outboxItem.text || '').includes(signupResult.verifyUrl),
+    'Email body must contain the verification link',
+  );
+
+  // 3. Test verification via verifyEmailTokenSql
+  const verifyRes = verifyEmailTokenSql({
+    token: signupResult.verifyToken,
+    email: uniqueEmail,
+  });
+  assert.equal(verifyRes.ok, true);
+  assert.equal(verifyRes.member?.emailVerified, true, 'User emailVerified must be true after verification');
+
+  // Invalid verification token check
+  const invalidVerify = verifyEmailTokenSql({
+    token: 'invalid-non-existent-token',
+    email: uniqueEmail,
+  });
+  assert.equal(invalidVerify.ok, false);
+
+  // 4. Test Resend Verification Email generates fresh token and outbox record
+  const resendResult = resendVerificationEmailSql(uniqueEmail, 'https://todo.snapsec.co');
+  assert.equal(resendResult.ok, true);
+  assert.ok(resendResult.verifyToken, 'Resend MUST generate a fresh verifyToken');
+  assert.ok(resendResult.verifyUrl, 'Resend MUST generate a verifyUrl');
+  assert.ok(resendResult.outboxItem, 'Resend MUST create an outbox email record');
+  assert.equal(resendResult.outboxItem.to, uniqueEmail);
+
+  // 5. Test Express REST API endpoints for Signup, Resend Verification, and Verify Email
+  const app = createApp();
+  const server = await new Promise<any>(resolve => {
+    const s = app.listen(0, '127.0.0.1', () => resolve(s));
+  });
+  const base = `http://127.0.0.1:${server.address().port}`;
+
+  try {
+    const apiTestEmail = `api-verify-${Date.now()}@snapsec-test.co`;
+
+    // A. POST /api/auth/signup
+    const signupReq = await fetch(`${base}/api/auth/signup`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        name: 'API Verify Test',
+        email: apiTestEmail,
+        password: 'SecurePassword123!',
+      }),
+    });
+    assert.equal(signupReq.status, 201);
+    const signupData = await signupReq.json();
+    assert.equal(signupData.ok, true);
+    assert.ok(signupData.verifyToken, 'API signup must return verifyToken');
+    assert.ok(signupData.verifyUrl, 'API signup must return verifyUrl');
+
+    // B. POST /api/auth/resend-verification
+    const resendReq = await fetch(`${base}/api/auth/resend-verification`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email: apiTestEmail }),
+    });
+    assert.equal(resendReq.status, 200);
+    const resendData = await resendReq.json();
+    assert.equal(resendData.ok, true);
+    assert.ok(resendData.verifyUrl, 'Resend API must return verifyUrl');
+
+    // C. POST /api/auth/verify
+    const verifyReq = await fetch(`${base}/api/auth/verify`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        token: resendData.verifyToken,
+        email: apiTestEmail,
+      }),
+    });
+    assert.equal(verifyReq.status, 200);
+    const verifyData = await verifyReq.json();
+    assert.equal(verifyData.ok, true);
+    assert.equal(verifyData.member.emailVerified, true);
+
+    // D. POST /api/auth/forgot initiates password reset email
+    const forgotReq = await fetch(`${base}/api/auth/forgot`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email: apiTestEmail }),
+    });
+    assert.equal(forgotReq.status, 200);
+    const forgotData = await forgotReq.json();
+    assert.equal(forgotData.ok, true);
+    assert.ok(forgotData.resetToken, 'Forgot API must issue resetToken');
+    assert.ok(forgotData.resetUrl, 'Forgot API must issue resetUrl');
+    assert.ok(forgotData.resetUrl.includes('#reset'), 'Reset URL must include #reset hash');
+
+    // Check outbox emails contain the forgot password item
+    const outbox = getOutboxEmailsSql();
+    const forgotEmail = outbox.find(item => item.to === apiTestEmail && item.subject.includes('Reset'));
+    assert.ok(forgotEmail, 'Outbox must contain password reset email for user');
+  } finally {
+    server.close();
+  }
+});
+

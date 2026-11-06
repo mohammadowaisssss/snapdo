@@ -52,6 +52,11 @@ export const pgMembers = pgTable(
     uid: text('uid'),
     name: text('name').notNull(),
     email: text('email').notNull(),
+    passwordHash: text('password_hash'),
+    resetToken: text('reset_token'),
+    resetExpiresAt: doublePrecision('reset_expires_at'),
+    verifyToken: text('verify_token'),
+    emailVerified: boolean('email_verified').notNull().default(false),
     photoUrl: text('photo_url'),
     role: text('role').notNull().default('Member'),
     teamId: text('team_id').notNull().default('product'),
@@ -277,11 +282,15 @@ export const pgOutboxEmails = pgTable(
 
 export const pgSessions = pgTable('sessions', {
   id: text('id').primaryKey(),
+  token: text('token'),
+  memberId: text('member_id'),
   device: text('device').notNull(),
   loc: text('loc').notNull(),
   ip: text('ip').notNull().default(''),
   lastActive: text('last_active').notNull().default('Active now'),
   isCurrent: boolean('is_current').notNull().default(false),
+  createdAt: doublePrecision('created_at'),
+  expiresAt: doublePrecision('expires_at'),
 });
 
 /* ============================================================================
@@ -322,6 +331,11 @@ export const sqliteMembers = sqliteTable(
     uid: sqliteText('uid'),
     name: sqliteText('name').notNull(),
     email: sqliteText('email').notNull(),
+    passwordHash: sqliteText('password_hash'),
+    resetToken: sqliteText('reset_token'),
+    resetExpiresAt: sqliteReal('reset_expires_at'),
+    verifyToken: sqliteText('verify_token'),
+    emailVerified: sqliteInteger('email_verified', { mode: 'boolean' }).notNull().default(false),
     photoUrl: sqliteText('photo_url'),
     role: sqliteText('role').notNull().default('Member'),
     teamId: sqliteText('team_id').notNull().default('product'),
@@ -547,9 +561,13 @@ export const sqliteOutboxEmails = sqliteTable(
 
 export const sqliteSessions = sqliteTable('sessions', {
   id: sqliteText('id').primaryKey(),
+  token: sqliteText('token'),
+  memberId: sqliteText('member_id'),
   device: sqliteText('device').notNull(),
   loc: sqliteText('loc').notNull(),
   ip: sqliteText('ip').notNull().default(''),
   lastActive: sqliteText('last_active').notNull().default('Active now'),
   isCurrent: sqliteInteger('is_current', { mode: 'boolean' }).notNull().default(false),
+  createdAt: sqliteReal('created_at'),
+  expiresAt: sqliteReal('expires_at'),
 });

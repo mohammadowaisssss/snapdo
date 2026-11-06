@@ -1,8 +1,7 @@
 /* ---------- store ---------- */
 import { TODAY, diffD, iso, parse, uid } from './utils.js';
 import { PCOLORS, TEAMS_SEED } from './constants.js';
-import { seed } from '../data/seed.js';
-
+import { isAuthenticated } from './auth.js';
 import { api } from './api.js';
 
 export const STORE_KEY = 'snapsec.v2';
@@ -19,40 +18,57 @@ export const DEFAULT_PREFS = {
   motion: 'system',
   home: 'home',
   openTasks: 'drawer',
-  name: 'Mohammad Owais',
-  title: 'Head of Product',
+  name: '',
+  title: '',
 };
-function cleanLegacyStore(j) {
-  if (!j || !j.data) return j;
-  if (j.prefs?.name === 'Tanjim Islam') j.prefs.name = 'Mohammad Owais';
-  const m1 = (j.data.members || []).find(m => m.id === 'm1');
-  if (m1 && (m1.name === 'Tanjim Islam' || m1.email === 'hello@snapsec.com')) {
-    m1.name = j.prefs?.name || 'Mohammad Owais';
-    m1.email = 'mohammadowais616@gmail.com';
-  }
-  return j;
+
+export function emptyWorkspaceData() {
+  return {
+    ws: { name: 'Snapsec', url: 'snapsec', c: '#2F2E2A', brand: true },
+    workspaces: [{ id: 'w1', name: 'Snapsec', c: '#2F2E2A', brand: true, plan: 'Business' }],
+    plan: 'Business',
+    me: 'm1',
+    tfa: false,
+    teams: TEAMS_SEED.map(t => ({ ...t })),
+    members: [],
+    projects: [],
+    projOrder: [],
+    tasks: [],
+    comments: [],
+    files: [],
+    notifs: [],
+    activity: [],
+    savedViews: [],
+    outbox: [],
+    sessions: [],
+    notifPrefs: { assign: true, mention: true, comment: true, status: false, due: true, digest: true },
+  };
 }
+
 export function load() {
+  if (!isAuthenticated()) return null;
   try {
     const raw = localStorage.getItem(STORE_KEY);
     if (raw) {
       const j = JSON.parse(raw);
-      if (j && j.data && j.data.tasks) return cleanLegacyStore(j);
+      if (j && j.data && Array.isArray(j.data.tasks)) return j;
     }
   } catch {
-    /* storage blocked or corrupt: start from seed data */
+    /* storage blocked or corrupt */
   }
   return null;
 }
+
 export const saved = load();
 export const S = {
-  data: saved?.data || seed(),
+  data: saved?.data || emptyWorkspaceData(),
   prefs: Object.assign({}, DEFAULT_PREFS, saved?.prefs || {}),
   views: saved?.views || {},
   ui: {
     fx: {},
-    auth: null,
+    auth: isAuthenticated() ? null : 'login',
     authStep: 'login',
+    af: { email: '', name: '' },
     onb: 0,
     onbData: { use: 'product', team: 'kanban', size: '2-10', ws: '', proj: 'Website Launch', tmpl: 'web', invites: '' },
     route: 'home',
@@ -60,7 +76,7 @@ export const S = {
     history: [],
     collapsed: !!saved?.collapsed,
     mnav: false,
-    expanded: { p1: true },
+    expanded: {},
     drawer: null,
     drawerFull: false,
     drawerTab: 'comments',
@@ -96,9 +112,11 @@ export const S = {
     commentFiles: {},
   },
 };
+
 export let _saveT;
 export function save(syncPrefsOnly = false) {
   _localMutCount++;
+  if (!isAuthenticated()) return;
   const payload = { data: S.data, prefs: S.prefs, views: S.views, collapsed: S.ui.collapsed };
   try {
     localStorage.setItem(STORE_KEY, JSON.stringify(payload));
@@ -111,14 +129,20 @@ export function save(syncPrefsOnly = false) {
 }
 
 export async function hydrateFromBackend(onHydrated) {
+  if (!isAuthenticated()) {
+    if (typeof onHydrated === 'function') onHydrated();
+    return;
+  }
   try {
     const remote = await api.bootstrap();
     if (remote && remote.data && Array.isArray(remote.data.tasks)) {
-      cleanLegacyStore(remote);
       S.data = remote.data;
       S.prefs = Object.assign({}, DEFAULT_PREFS, remote.prefs || {});
       S.views = remote.views || {};
       S.ui.collapsed = !!remote.collapsed;
+      if (S.data.projects?.[0]?.id && Object.keys(S.ui.expanded || {}).length === 0) {
+        S.ui.expanded = { [S.data.projects[0].id]: true };
+      }
       try {
         localStorage.setItem(
           STORE_KEY,
@@ -130,7 +154,7 @@ export async function hydrateFromBackend(onHydrated) {
       if (typeof onHydrated === 'function') onHydrated();
     }
   } catch {
-    /* fallback to local seed/cache if backend unreachable */
+    /* fallback if backend unreachable */
   }
 }
 
@@ -147,36 +171,26 @@ export function applyAuthenticatedUser(profile) {
   const d = S.data;
   d.members = d.members || [];
   let member =
+    (profile.id && d.members.find(m => m.id === profile.id)) ||
     (profile.uid && d.members.find(m => m.uid === profile.uid)) ||
     d.members.find(m => String(m.email || '').toLowerCase() === email.toLowerCase());
 
   if (!member) {
-    const primaryOwner = d.members.find(m => m.id === 'm1') || d.members[0];
-    if (primaryOwner) {
-      primaryOwner.name = derivedName;
-      primaryOwner.email = email;
-      if (profile.photoURL !== undefined) primaryOwner.photoURL = profile.photoURL;
-      if (profile.uid) primaryOwner.uid = profile.uid;
-      primaryOwner.status = 'active';
-      primaryOwner.last = 0;
-      member = primaryOwner;
-    } else {
-      member = {
-        id: 'm1',
-        uid: profile.uid || '',
-        name: derivedName,
-        email,
-        photoURL: profile.photoURL || '',
-        role: 'Owner',
-        team: 'product',
-        title: S.prefs.title || 'Head of Product',
-        c: '#5A67D8',
-        status: 'active',
-        last: 0,
-        tz: 'San Francisco',
-      };
-      d.members.unshift(member);
-    }
+    member = {
+      id: profile.id || 'm1',
+      uid: profile.uid || '',
+      name: derivedName,
+      email,
+      photoURL: profile.photoURL || '',
+      role: profile.role || (d.members.length === 0 ? 'Owner' : 'Member'),
+      team: profile.team || 'product',
+      title: profile.title || S.prefs.title || (d.members.length === 0 ? 'Workspace Owner' : 'Member'),
+      c: profile.c || '#5A67D8',
+      status: 'active',
+      last: 0,
+      tz: profile.tz || 'UTC',
+    };
+    d.members.unshift(member);
   } else {
     if (profile.name && String(profile.name).trim()) {
       member.name = String(profile.name).trim();
@@ -184,6 +198,8 @@ export function applyAuthenticatedUser(profile) {
     member.email = email;
     if (profile.photoURL) member.photoURL = profile.photoURL;
     if (profile.uid) member.uid = profile.uid;
+    if (profile.role) member.role = profile.role;
+    if (profile.title) member.title = profile.title;
     member.status = 'active';
     member.last = 0;
   }
@@ -201,7 +217,20 @@ export function applyAuthenticatedUser(profile) {
 
 /* ---------- lookups ---------- */
 export const D = () => S.data;
-export const me = () => D().members.find(m => m.id === D().me) || D().members[0];
+export const me = () =>
+  D().members.find(m => m.id === D().me) ||
+  D().members[0] || {
+    id: D().me || 'm1',
+    name: S.prefs.name || 'Workspace User',
+    email: S.ui.af?.email || '',
+    role: 'Owner',
+    team: 'product',
+    title: S.prefs.title || 'Workspace Owner',
+    c: '#5A67D8',
+    status: 'active',
+    last: 0,
+    tz: 'UTC',
+  };
 export const mem = id => D().members.find(m => m.id === id);
 export const proj = id => D().projects.find(p => p.id === id);
 export const task = id => D().tasks.find(t => t.id === id);
@@ -211,7 +240,7 @@ export const visibleProjects = () =>
     .projOrder.map(proj)
     .filter(Boolean)
     .filter(p => !p.archived);
-export const canSee = p => !p.private || p.members.includes(D().me);
+export const canSee = p => !p || !p.private || (Array.isArray(p.members) && p.members.includes(D().me));
 export const tasksOf = pid => D().tasks.filter(t => t.project === pid && !t.archived);
 export const allTasks = () => D().tasks.filter(t => !t.archived && canSee(proj(t.project)));
 export const isOver = t => t.due && t.status !== 'done' && diffD(parse(t.due), TODAY) < 0;

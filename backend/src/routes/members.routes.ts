@@ -3,6 +3,7 @@ import {
   acceptInviteTokenSql,
   createResendInviteSql,
   deleteMemberSql,
+  getInviteByTokenSql,
   getProjectByIdSql,
   inviteMembersSql,
   listMembersAndOutboxSql,
@@ -52,6 +53,7 @@ membersRouter.post('/members/invite', rateLimit(15, 60_000), async (req, res) =>
       invited,
       members: latest.members,
       outbox: deliveredEmails,
+      emailsSent: deliveredEmails,
       updatedAt,
     });
   } catch (err: any) {
@@ -81,9 +83,30 @@ membersRouter.post('/members/:id/resend-invite', rateLimit(15, 60_000), async (r
   });
 });
 
+membersRouter.get('/invites/:token', (req, res) => {
+  const invite = getInviteByTokenSql(req.params.token);
+  if (!invite) {
+    res.status(404).json({ ok: false, error: 'Invitation not found or already accepted' });
+    return;
+  }
+  res.json({ ok: true, invite });
+});
+
 membersRouter.post('/invites/accept', (req, res) => {
-  const { token, email } = req.body || {};
-  const result = acceptInviteTokenSql(token || email);
+  const { token, email, name, password } = req.body || {};
+  if (password !== undefined && (String(password).length < 10 || !/[0-9\W]/.test(String(password)))) {
+    res.status(400).json({
+      error: 'Use at least 10 characters, including a number or symbol',
+      errors: { pw: 'Use at least 10 characters, including a number or symbol' },
+    });
+    return;
+  }
+  const result = acceptInviteTokenSql(token || email, {
+    name,
+    password,
+    userAgent: req.get('user-agent') || '',
+    ip: req.ip || '127.0.0.1',
+  });
   if (!result) {
     res.status(404).json({ error: 'Invitation not found or already expired' });
     return;
@@ -92,8 +115,11 @@ membersRouter.post('/invites/accept', (req, res) => {
   res.json({
     ok: true,
     member: result.member,
+    user: result.member,
     me: result.me,
     prefs: result.prefs,
+    token: result.token,
+    expiresAt: result.expiresAt,
     members: latest.members,
     updatedAt: result.updatedAt,
   });

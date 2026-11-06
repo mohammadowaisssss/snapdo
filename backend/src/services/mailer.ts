@@ -28,12 +28,32 @@ export function buildRawMimeEmail(outboxItem: any, fromEmail: string): string {
     .replace(/=+$/, '');
 }
 
+export function getActiveSmtpConfig(): {
+  host: string;
+  port: number;
+  user: string;
+  pass: string;
+  from: string;
+  secure: boolean;
+  configured: boolean;
+} {
+  const runtimeSmtp = (getSmtpConfigSql() || {}) as Record<string, any>;
+  const host = String(runtimeSmtp.host || process.env.SMTP_HOST || '').trim();
+  const port = Number(runtimeSmtp.port || process.env.SMTP_PORT || (runtimeSmtp.secure ? 465 : 587));
+  const user = String(runtimeSmtp.user || process.env.SMTP_USER || '').trim();
+  const pass = String(runtimeSmtp.pass || process.env.SMTP_PASS || '').replace(/\s+/g, '');
+  const from = String(runtimeSmtp.from || process.env.SMTP_FROM || user || 'mohammadowais616@gmail.com').trim();
+  const secure = runtimeSmtp.secure !== undefined ? Boolean(runtimeSmtp.secure) : port === 465;
+  const configured = Boolean(host && (user ? pass : true));
+  return { host, port, user, pass, from, secure, configured };
+}
+
 export async function dispatchOutboxEmail(
   outboxItem: any,
-  opts: { googleAccessToken?: string; senderEmail?: string } = {},
+  opts: { googleAccessToken?: string; senderEmail?: string; forceRealTransport?: boolean } = {},
 ) {
   if (!outboxItem) return outboxItem;
-  if (process.env.NODE_ENV === 'test') {
+  if (process.env.NODE_ENV === 'test' && !opts.forceRealTransport) {
     outboxItem.status = 'sent';
     outboxItem.transport = 'test';
     outboxItem.deliveredToInbox = true;
@@ -44,7 +64,58 @@ export async function dispatchOutboxEmail(
   const googleToken = opts.googleAccessToken || '';
   const senderEmail = opts.senderEmail || outboxItem.from || 'mohammadowais616@gmail.com';
 
-  // 1. Try Google OAuth (Gmail REST API first, then smtp.gmail.com:465 XOAUTH2)
+  // 1. Try real custom SMTP config saved in SQL workspace or environment variables
+  const smtp = getActiveSmtpConfig();
+  const ssrfCheck = smtp.host ? isSafeSmtpTarget(smtp.host, smtp.port) : { ok: false };
+  if (smtp.configured && ssrfCheck.ok) {
+    try {
+      const transportOpts: any = {
+        host: smtp.host,
+        port: smtp.port,
+        secure: smtp.secure,
+        connectionTimeout: 15000,
+        greetingTimeout: 15000,
+        socketTimeout: 20000,
+      };
+      if (smtp.user) {
+        transportOpts.auth = {
+          user: smtp.user,
+          pass: smtp.pass,
+        };
+      }
+      if (process.env.SMTP_ALLOW_INVALID_CERTS === 'true' || process.env.SMTP_IGNORE_TLS === 'true') {
+        transportOpts.tls = { rejectUnauthorized: false };
+      }
+      const customTransporter = nodemailer.createTransport(transportOpts);
+
+      const cleanFromName = sanitizeHeaderValue(outboxItem.fromName || 'Snapsec Workspace', 100).replace(/"/g, '');
+      const cleanFromEmail = sanitizeHeaderValue(smtp.from || smtp.user || outboxItem.from, 150);
+      const cleanToName = sanitizeHeaderValue(outboxItem.toName || 'Member', 100).replace(/"/g, '');
+      const cleanToEmail = sanitizeHeaderValue(outboxItem.to, 150);
+
+      const info = await customTransporter.sendMail({
+        from: `"${cleanFromName}" <${cleanFromEmail}>`,
+        to: `"${cleanToName}" <${cleanToEmail}>`,
+        replyTo: outboxItem.from || cleanFromEmail,
+        subject: sanitizeHeaderValue(outboxItem.subject, 200),
+        text: outboxItem.text,
+        html: outboxItem.html,
+      });
+
+      outboxItem.messageId = info.messageId;
+      outboxItem.status = 'sent';
+      outboxItem.transport = 'custom-smtp';
+      outboxItem.deliveredToInbox = true;
+      outboxItem.transportError = undefined;
+      updateOutboxItemDeliverySql(outboxItem);
+      return outboxItem;
+    } catch (err: any) {
+      console.warn(`[SMTP Delivery Warning] Failed sending to ${outboxItem.to} via ${smtp.host}:${smtp.port}:`, err?.message || err);
+      outboxItem.transportError = `SMTP Error: ${err?.message || 'Authentication or network failed'}`;
+    }
+  }
+
+  // 2. Try Google OAuth (Gmail REST API first, then smtp.gmail.com:465 XOAUTH2)
   if (googleToken) {
     try {
       const raw = buildRawMimeEmail(outboxItem, senderEmail);
@@ -100,47 +171,7 @@ export async function dispatchOutboxEmail(
     }
   }
 
-  // 2. Try runtime SMTP config saved in SQL workspace or environment variables
-  const runtimeSmtp = getSmtpConfigSql();
-  const smtpHost = runtimeSmtp.host || process.env.SMTP_HOST || '';
-  const smtpPort = Number(runtimeSmtp.port || process.env.SMTP_PORT || 465);
-  const smtpUser = runtimeSmtp.user || process.env.SMTP_USER || '';
-  const smtpPass = runtimeSmtp.pass || process.env.SMTP_PASS || '';
-  const smtpFrom = runtimeSmtp.from || process.env.SMTP_FROM || smtpUser || outboxItem.from;
-
-  const ssrfCheck = smtpHost ? isSafeSmtpTarget(smtpHost, smtpPort) : { ok: false };
-  if (smtpHost && smtpUser && smtpPass && ssrfCheck.ok) {
-    try {
-      const customTransporter = nodemailer.createTransport({
-        host: smtpHost,
-        port: smtpPort,
-        secure: smtpPort === 465,
-        auth: { user: smtpUser, pass: smtpPass },
-      });
-      const cleanFromName = sanitizeHeaderValue(outboxItem.fromName || 'Snapsec Workspace', 100).replace(/"/g, '');
-      const cleanFromEmail = sanitizeHeaderValue(smtpFrom, 150);
-      const cleanToName = sanitizeHeaderValue(outboxItem.toName || 'Member', 100).replace(/"/g, '');
-      const cleanToEmail = sanitizeHeaderValue(outboxItem.to, 150);
-      const info = await customTransporter.sendMail({
-        from: `"${cleanFromName}" <${cleanFromEmail}>`,
-        to: `"${cleanToName}" <${cleanToEmail}>`,
-        subject: sanitizeHeaderValue(outboxItem.subject, 200),
-        text: outboxItem.text,
-        html: outboxItem.html,
-      });
-      outboxItem.messageId = info.messageId;
-      outboxItem.status = 'sent';
-      outboxItem.transport = 'custom-smtp';
-      outboxItem.deliveredToInbox = true;
-      outboxItem.transportError = undefined;
-      updateOutboxItemDeliverySql(outboxItem);
-      return outboxItem;
-    } catch (err: any) {
-      outboxItem.transportError = `SMTP Error: ${err?.message || 'Authentication failed'}`;
-    }
-  }
-
-  // 3. Fallback: Ethereal test SMTP relay so preview URL is always generated
+  // 3. Fallback: Ethereal test SMTP relay so preview URL is always generated and links are testable
   try {
     if (!cachedEtherealAccount) {
       cachedEtherealAccount = await nodemailer.createTestAccount();

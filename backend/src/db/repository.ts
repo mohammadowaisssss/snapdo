@@ -24,6 +24,13 @@ import {
   makeProjectKey,
 } from '../services/engine.ts';
 import {
+  generateAuthToken,
+  generateSecureToken,
+  hashPassword,
+  verifyAuthToken,
+  verifyPassword,
+} from '../services/token.ts';
+import {
   DATA_DIR,
   createPgPool,
   ensurePgSchema,
@@ -147,41 +154,76 @@ function getCurrentMeId(): string {
   return row?.meMemberId || 'm1';
 }
 
+function isTestRuntime(): boolean {
+  return (
+    process.env.NODE_ENV === 'test' ||
+    process.execArgv.includes('--test') ||
+    process.argv.includes('--test')
+  );
+}
+
+export function createCleanProductionState(): PersistedStore {
+  return {
+    data: {
+      ws: { name: 'Snapsec', url: 'snapsec', c: '#2F2E2A', brand: true },
+      workspaces: [{ id: 'w1', name: 'Snapsec', c: '#2F2E2A', brand: true, plan: 'Business' }],
+      plan: 'Business',
+      me: 'm1',
+      tfa: false,
+      teams: TEAMS_SEED.map((t: any) => ({ ...t })),
+      members: [],
+      projects: [],
+      projOrder: [],
+      tasks: [],
+      comments: [],
+      files: [],
+      notifs: [],
+      activity: [],
+      savedViews: [],
+      outbox: [],
+      sessions: [],
+      notifPrefs: { assign: true, mention: true, comment: true, status: false, due: true, digest: true },
+    },
+    prefs: { ...DEFAULT_PREFS, name: '', title: '' },
+    views: {},
+    collapsed: false,
+    updatedAt: Date.now(),
+  };
+}
+
 /**
- * Ensures the relational database is initialized and seeded (or migrated once from legacy JSON if present).
- * Never caches dataset in memory; all reads/writes hit SQLite WAL / PostgreSQL tables directly.
+ * Ensures the relational database is initialized and seeded.
+ * In production/normal mode, never seeds fake demo tasks or fake accounts.
+ * In unit test mode (NODE_ENV=test), seeds the deterministic test fixture state.
  */
 export function ensureRelationalDatabaseSeeded(): void {
   const conn = getSqliteConnection();
+  const isTest = isTestRuntime();
   const existing = conn.prepare(`SELECT id FROM workspaces WHERE id = 'ws_main' LIMIT 1`).get();
   if (existing) {
-    // Sanitize any legacy owner identity in SQL rows if present
-    conn
-      .prepare(
-        `UPDATE members SET name = 'Mohammad Owais', email = 'mohammadowais616@gmail.com'
-         WHERE id = 'm1' AND (name = 'Tanjim Islam' OR email = 'hello@snapsec.com')`,
-      )
-      .run();
+    if (!isTest) {
+      // If database still has legacy unauthenticated seed data (e.g. sarah@snapsec.com and 0 password hashes), wipe fake data once
+      const realUsers = conn
+        .prepare(`SELECT COUNT(*) AS cnt FROM members WHERE password_hash IS NOT NULL AND password_hash != ''`)
+        .get() as { cnt: number };
+      const fakeSeedMember = conn
+        .prepare(`SELECT id FROM members WHERE LOWER(email) = 'sarah@snapsec.com' LIMIT 1`)
+        .get();
+      if (Number(realUsers?.cnt || 0) === 0 && fakeSeedMember) {
+        populateAllTablesTransaction(createCleanProductionState());
+      }
+    } else {
+      conn
+        .prepare(
+          `UPDATE members SET name = 'Mohammad Owais', email = 'mohammadowais616@gmail.com'
+           WHERE id = 'm1' AND (name = 'Tanjim Islam' OR email = 'hello@snapsec.com')`,
+        )
+        .run();
+    }
     return;
   }
 
-  // Check if a legacy snapsec-db.json exists to migrate once into normalized SQL tables
-  const legacyFile = path.join(DATA_DIR, 'snapsec-db.json');
-  let initialStore: PersistedStore | null = null;
-  if (process.env.NODE_ENV !== 'test' && fs.existsSync(legacyFile)) {
-    try {
-      const parsed = JSON.parse(fs.readFileSync(legacyFile, 'utf8'));
-      if (parsed && parsed.data && Array.isArray(parsed.data.tasks)) {
-        initialStore = parsed;
-      }
-    } catch {
-      initialStore = null;
-    }
-  }
-  if (!initialStore) {
-    initialStore = createDefaultState();
-  }
-
+  const initialStore = isTest ? createDefaultState() : createCleanProductionState();
   populateAllTablesTransaction(initialStore);
 }
 
@@ -257,6 +299,8 @@ export function populateAllTablesTransaction(store: PersistedStore): number {
           uid: m.uid ? String(m.uid) : null,
           name: isLegacyOwner ? prefs.name || 'Mohammad Owais' : String(m.name || 'Member'),
           email: isLegacyOwner ? 'mohammadowais616@gmail.com' : String(m.email || ''),
+          passwordHash: m.passwordHash ? String(m.passwordHash) : null,
+          emailVerified: Boolean(m.emailVerified),
           photoUrl: m.photoURL ? String(m.photoURL) : null,
           role: String(m.role || 'Member'),
           teamId: String(m.team ?? ''),
@@ -554,6 +598,8 @@ function mapMemberRow(r: typeof sqliteMembers.$inferSelect) {
     status: r.status,
     last: r.lastSeen,
     tz: r.tz,
+    emailVerified: Boolean(r.emailVerified),
+    ...(r.verifyToken ? { verifyToken: r.verifyToken } : {}),
     ...(r.inviteToken ? { inviteToken: r.inviteToken } : {}),
     ...(r.inviteUrl ? { inviteUrl: r.inviteUrl } : {}),
     ...(r.lastInviteId ? { lastInviteId: r.lastInviteId } : {}),
@@ -2430,7 +2476,47 @@ export function updateOutboxItemDeliverySql(outboxItem: any) {
   touchWorkspaceRow(now);
 }
 
-export function acceptInviteTokenSql(tokenOrEmail: string) {
+export function getOutboxEmailsSql() {
+  ensureRelationalDatabaseSeeded();
+  const rows = sqliteDb
+    .select()
+    .from(sqliteOutboxEmails)
+    .orderBy(desc(sqliteOutboxEmails.sentAt))
+    .all();
+  return rows.map(mapOutboxRow);
+}
+
+export function getInviteByTokenSql(tokenOrEmail: string) {
+  ensureRelationalDatabaseSeeded();
+  const needle = String(tokenOrEmail || '').trim();
+  if (!needle) return null;
+  const conn = getSqliteConnection();
+  const mRow = conn
+    .prepare(
+      `SELECT * FROM members
+       WHERE invite_token = ? OR LOWER(email) = LOWER(?)
+       LIMIT 1`,
+    )
+    .get(needle, needle) as any;
+  if (!mRow) return null;
+  const wsRow = sqliteDb.select().from(sqliteWorkspaces).where(eq(sqliteWorkspaces.id, 'ws_main')).get();
+  return {
+    id: mRow.id,
+    name: mRow.name,
+    email: mRow.email,
+    role: mRow.role,
+    team: mRow.team_id,
+    status: mRow.status,
+    inviteToken: mRow.invite_token,
+    hasPassword: Boolean(mRow.password_hash),
+    workspaceName: wsRow?.name || 'Snapsec',
+  };
+}
+
+export function acceptInviteTokenSql(
+  tokenOrEmail: string,
+  opts: { name?: string; password?: string; userAgent?: string; ip?: string } = {},
+) {
   ensureRelationalDatabaseSeeded();
   const needle = String(tokenOrEmail || '').trim();
   if (!needle) return null;
@@ -2445,10 +2531,24 @@ export function acceptInviteTokenSql(tokenOrEmail: string) {
   if (!mRow) return null;
 
   const now = Date.now();
+  const cleanName = opts.name ? safeString(opts.name, 120).trim() : '';
+  const pwHash = opts.password ? hashPassword(opts.password) : null;
+
   conn.transaction(() => {
+    const memberUpdates: Record<string, any> = {
+      status: 'active',
+      lastSeen: 0,
+      emailVerified: true,
+    };
+    if (cleanName) memberUpdates.name = cleanName;
+    if (pwHash) {
+      memberUpdates.passwordHash = pwHash;
+      memberUpdates.inviteToken = null;
+    }
+
     sqliteDb
       .update(sqliteMembers)
-      .set({ status: 'active', lastSeen: 0 })
+      .set(memberUpdates)
       .where(eq(sqliteMembers.id, mRow.id))
       .run();
 
@@ -2493,10 +2593,13 @@ export function acceptInviteTokenSql(tokenOrEmail: string) {
 
   const updatedMember = sqliteDb.select().from(sqliteMembers).where(eq(sqliteMembers.id, mRow.id)).get()!;
   const wsRow = sqliteDb.select().from(sqliteWorkspaces).where(eq(sqliteWorkspaces.id, 'ws_main')).get()!;
+  const sessionInfo = createAuthSessionSql(updatedMember.id, updatedMember.email, updatedMember.name, opts.userAgent, opts.ip, true);
   return {
     member: mapMemberRow(updatedMember),
     me: wsRow.meMemberId,
     prefs: { ...DEFAULT_PREFS, ...safeJsonParse<Record<string, any>>(wsRow.prefsJson, {}) },
+    token: sessionInfo.token,
+    expiresAt: sessionInfo.expiresAt,
     updatedAt: now,
   };
 }
@@ -3088,6 +3191,766 @@ export function authenticateWorkspaceUserSql(profile: {
   };
 }
 
+function describeDeviceFromUserAgent(ua = ''): string {
+  const s = String(ua || '');
+  if (!s) return 'Web Browser';
+  const browser = s.includes('Edg/')
+    ? 'Edge'
+    : s.includes('Chrome/')
+      ? 'Chrome'
+      : s.includes('Firefox/')
+        ? 'Firefox'
+        : s.includes('Safari/')
+          ? 'Safari'
+          : 'Browser';
+  const os = s.includes('Mac OS X')
+    ? 'macOS'
+    : s.includes('Windows')
+      ? 'Windows'
+      : s.includes('iPhone') || s.includes('iPad')
+        ? 'iOS'
+        : s.includes('Android')
+          ? 'Android'
+          : s.includes('Linux')
+            ? 'Linux'
+            : 'Desktop';
+  return `${browser} on ${os}`;
+}
+
+export function createAuthSessionSql(
+  memberId: string,
+  email: string,
+  name = '',
+  userAgent = '',
+  ip = '127.0.0.1',
+  rememberMe = true,
+) {
+  ensureRelationalDatabaseSeeded();
+  const conn = getSqliteConnection();
+  const now = Date.now();
+  const sessionId = uid('ss');
+  const auth = generateAuthToken({ email, name, id: memberId, sessionId }, rememberMe);
+  const device = describeDeviceFromUserAgent(userAgent);
+  const cleanIp = safeString(ip, 64, '127.0.0.1') || '127.0.0.1';
+
+  conn.transaction(() => {
+    conn.prepare(`UPDATE sessions SET is_current = 0 WHERE member_id = ?`).run(memberId);
+    sqliteDb
+      .insert(sqliteSessions)
+      .values({
+        id: sessionId,
+        token: auth.token,
+        memberId,
+        device,
+        loc: 'Authenticated session',
+        ip: cleanIp,
+        lastActive: 'Active now',
+        isCurrent: true,
+        createdAt: now,
+        expiresAt: auth.expiresAt,
+      })
+      .run();
+  })();
+
+  return {
+    sessionId,
+    token: auth.token,
+    expiresAt: auth.expiresAt,
+    session: {
+      id: sessionId,
+      device,
+      loc: 'Authenticated session',
+      ip: cleanIp,
+      last: 'Active now',
+      cur: true,
+    },
+  };
+}
+
+export function createEmailVerificationRecordSql(
+  memberId: string,
+  email: string,
+  name: string,
+  baseUrl = 'http://localhost:4000',
+) {
+  ensureRelationalDatabaseSeeded();
+  const conn = getSqliteConnection();
+  const cleanEmail = String(email || '').trim().toLowerCase();
+  const verifyToken = generateSecureToken('vfy');
+  const cleanBase = sanitizeBaseUrl(baseUrl, 'http://localhost:4000');
+  const verifyUrl = `${cleanBase}/?verify=${encodeURIComponent(verifyToken)}&email=${encodeURIComponent(cleanEmail)}#verify`;
+  const wsRow = sqliteDb.select().from(sqliteWorkspaces).where(eq(sqliteWorkspaces.id, 'ws_main')).get()!;
+  const wsName = wsRow?.name || 'Snapsec';
+  const now = Date.now();
+  const outboxId = uid('em');
+
+  const subject = `Verify your email for ${wsName}`;
+  const textBody = `Hi ${name},\n\nPlease verify your email address for your ${wsName} account (${cleanEmail}) by clicking the link below:\n\n${verifyUrl}\n\nIf you did not create this account, you can safely ignore this email.`;
+  const htmlBody = `<div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;max-width:560px;margin:0 auto;padding:28px;background:#ffffff;border:1px solid #e5e7eb;border-radius:12px;color:#111827">
+    <div style="margin-bottom:20px">
+      <img src="https://suite.snapsec.co/media/logos/snapsec.svg" alt="${esc(wsName)}" style="height:28px;width:auto;display:block" />
+    </div>
+    <h2 style="font-size:20px;font-weight:600;margin:0 0 12px;color:#111827">Verify your email address</h2>
+    <p style="font-size:14px;line-height:1.6;color:#374151;margin:0 0 16px">Hi <strong>${esc(name)}</strong>, thank you for joining <strong>${esc(wsName)}</strong>. Please verify that <strong>${esc(cleanEmail)}</strong> belongs to you to activate your workspace access.</p>
+    <div style="margin:24px 0">
+      <a href="${esc(verifyUrl)}" target="_blank" rel="noopener noreferrer" style="display:inline-block;background:#4F46E5;color:#ffffff;font-weight:600;font-size:14px;padding:11px 22px;border-radius:8px;text-decoration:none">Verify email address</a>
+    </div>
+    <p style="font-size:12.5px;line-height:1.5;color:#6B7280;margin:0 0 8px">Or copy and paste this verification link into your browser:</p>
+    <div style="font-family:monospace;font-size:12px;padding:10px 12px;background:#F3F4F6;border-radius:6px;word-break:break-all;color:#1F2937">${esc(verifyUrl)}</div>
+    <hr style="border:none;border-top:1px solid #E5E7EB;margin:24px 0 12px" />
+    <div style="font-size:11.5px;color:#9CA3AF">Sent by ${esc(wsName)} TaskTracker · Security &amp; Engineering Workspace</div>
+  </div>`;
+
+  conn.transaction(() => {
+    sqliteDb
+      .update(sqliteMembers)
+      .set({
+        verifyToken,
+        emailVerified: false,
+      })
+      .where(eq(sqliteMembers.id, memberId))
+      .run();
+
+    sqliteDb
+      .insert(sqliteOutboxEmails)
+      .values({
+        id: outboxId,
+        memberId,
+        toEmail: cleanEmail,
+        toName: name,
+        fromEmail: 'security@snapsec.co',
+        fromName: `${wsName} Security`,
+        subject,
+        textBody,
+        htmlBody,
+        inviteToken: verifyToken,
+        inviteUrl: verifyUrl,
+        role: 'Member',
+        teamId: 'product',
+        sentAt: now,
+        status: 'queued',
+        deliveredToInbox: false,
+      })
+      .run();
+  })();
+
+  const outboxRow = sqliteDb.select().from(sqliteOutboxEmails).where(eq(sqliteOutboxEmails.id, outboxId)).get()!;
+  return {
+    verifyToken,
+    verifyUrl,
+    outboxItem: mapOutboxRow(outboxRow),
+  };
+}
+
+export function signupUserSql(input: {
+  name: string;
+  email: string;
+  password: string;
+  userAgent?: string;
+  ip?: string;
+  baseUrl?: string;
+}) {
+  ensureRelationalDatabaseSeeded();
+  const conn = getSqliteConnection();
+  const email = String(input.email || '').trim().toLowerCase();
+  const name = safeString(input.name, 120).trim();
+  const pwHash = hashPassword(input.password);
+  const now = Date.now();
+
+  const existing = conn
+    .prepare(`SELECT * FROM members WHERE LOWER(email) = LOWER(?) LIMIT 1`)
+    .get(email) as any;
+
+  if (existing && existing.password_hash) {
+    return {
+      ok: false as const,
+      status: 409,
+      error: 'An account with this email already exists. Please sign in instead.',
+      errors: { email: 'An account with this email already exists. Please sign in instead.' },
+    };
+  }
+
+  const realUsersCount = conn
+    .prepare(`SELECT COUNT(*) AS cnt FROM members WHERE password_hash IS NOT NULL AND password_hash != ''`)
+    .get() as { cnt: number };
+  const isFirstRealAccount = Number(realUsersCount?.cnt || 0) === 0;
+
+  let targetMemberId = existing?.id || (isFirstRealAccount ? 'm1' : uid('m'));
+  const verifyToken = generateSecureToken('vfy');
+  const cleanBase = sanitizeBaseUrl(input.baseUrl, 'http://localhost:4000');
+  const verifyUrl = `${cleanBase}/?verify=${encodeURIComponent(verifyToken)}&email=${encodeURIComponent(email)}#verify`;
+  const wsRow = sqliteDb.select().from(sqliteWorkspaces).where(eq(sqliteWorkspaces.id, 'ws_main')).get()!;
+  const wsName = wsRow?.name || 'Snapsec';
+  const outboxId = uid('em');
+
+  conn.transaction(() => {
+    if (isFirstRealAccount && !existing && !isTestRuntime()) {
+      // Clean any unauthenticated placeholder rows so the first real owner starts fresh
+      conn.prepare(`DELETE FROM subtasks`).run();
+      conn.prepare(`DELETE FROM comments`).run();
+      conn.prepare(`DELETE FROM files`).run();
+      conn.prepare(`DELETE FROM tasks`).run();
+      conn.prepare(`DELETE FROM projects`).run();
+      conn.prepare(`DELETE FROM notifications`).run();
+      conn.prepare(`DELETE FROM activity_logs`).run();
+      conn.prepare(`DELETE FROM saved_views`).run();
+      conn.prepare(`DELETE FROM outbox_emails`).run();
+      conn.prepare(`DELETE FROM sessions`).run();
+      conn.prepare(`DELETE FROM members`).run();
+    }
+
+    if (existing) {
+      targetMemberId = existing.id;
+      sqliteDb
+        .update(sqliteMembers)
+        .set({
+          name: name || existing.name,
+          email,
+          passwordHash: pwHash,
+          verifyToken,
+          emailVerified: false,
+          status: 'active',
+          lastSeen: 0,
+          inviteToken: null,
+        })
+        .where(eq(sqliteMembers.id, targetMemberId))
+        .run();
+    } else {
+      const m1Exists = conn.prepare(`SELECT id FROM members WHERE id = 'm1' LIMIT 1`).get() as any;
+      if (targetMemberId === 'm1' && m1Exists) {
+        sqliteDb
+          .update(sqliteMembers)
+          .set({
+            name,
+            email,
+            passwordHash: pwHash,
+            verifyToken,
+            emailVerified: false,
+            role: 'Owner',
+            title: 'Workspace Owner',
+            status: 'active',
+            lastSeen: 0,
+          })
+          .where(eq(sqliteMembers.id, 'm1'))
+          .run();
+      } else {
+        if (targetMemberId === 'm1' && m1Exists) targetMemberId = uid('m');
+        sqliteDb
+          .insert(sqliteMembers)
+          .values({
+            id: targetMemberId,
+            name,
+            email,
+            passwordHash: pwHash,
+            verifyToken,
+            emailVerified: false,
+            role: isFirstRealAccount ? 'Owner' : 'Member',
+            teamId: 'product',
+            title: isFirstRealAccount ? 'Workspace Owner' : 'Member',
+            color: '#5A67D8',
+            status: 'active',
+            lastSeen: 0,
+            tz: 'UTC',
+          })
+          .run();
+      }
+    }
+
+    const verifySubject = `Verify your email for ${wsName}`;
+    const verifyText = `Hi ${name},\n\nPlease verify your email address for your ${wsName} account (${email}) by clicking the link below:\n\n${verifyUrl}\n\nIf you did not sign up for this account, you can safely ignore this email.`;
+    const verifyHtml = `<div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;max-width:560px;margin:0 auto;padding:28px;background:#ffffff;border:1px solid #e5e7eb;border-radius:12px;color:#111827">
+      <div style="margin-bottom:20px">
+        <img src="https://suite.snapsec.co/media/logos/snapsec.svg" alt="${esc(wsName)}" style="height:28px;width:auto;display:block" />
+      </div>
+      <h2 style="font-size:20px;font-weight:600;margin:0 0 12px;color:#111827">Verify your email address</h2>
+      <p style="font-size:14px;line-height:1.6;color:#374151;margin:0 0 16px">Hi <strong>${esc(name)}</strong>, thank you for joining <strong>${esc(wsName)}</strong>. Please verify that <strong>${esc(email)}</strong> belongs to you to activate your workspace access.</p>
+      <div style="margin:24px 0">
+        <a href="${esc(verifyUrl)}" target="_blank" rel="noopener noreferrer" style="display:inline-block;background:#4F46E5;color:#ffffff;font-weight:600;font-size:14px;padding:11px 22px;border-radius:8px;text-decoration:none">Verify email address</a>
+      </div>
+      <p style="font-size:12.5px;line-height:1.5;color:#6B7280;margin:0 0 8px">Or copy and paste this verification link into your browser:</p>
+      <div style="font-family:monospace;font-size:12px;padding:10px 12px;background:#F3F4F6;border-radius:6px;word-break:break-all;color:#1F2937">${esc(verifyUrl)}</div>
+      <hr style="border:none;border-top:1px solid #E5E7EB;margin:24px 0 12px" />
+      <div style="font-size:11.5px;color:#9CA3AF">Sent by ${esc(wsName)} TaskTracker · Security &amp; Engineering Workspace</div>
+    </div>`;
+
+    sqliteDb
+      .insert(sqliteOutboxEmails)
+      .values({
+        id: outboxId,
+        memberId: targetMemberId,
+        toEmail: email,
+        toName: name,
+        fromEmail: 'security@snapsec.co',
+        fromName: `${wsName} Security`,
+        subject: verifySubject,
+        textBody: verifyText,
+        htmlBody: verifyHtml,
+        inviteToken: verifyToken,
+        inviteUrl: verifyUrl,
+        role: isFirstRealAccount ? 'Owner' : 'Member',
+        teamId: 'product',
+        sentAt: now,
+        status: 'queued',
+        deliveredToInbox: false,
+      })
+      .run();
+
+    const memberRow = sqliteDb.select().from(sqliteMembers).where(eq(sqliteMembers.id, targetMemberId)).get()!;
+    const prefs = { ...DEFAULT_PREFS, ...safeJsonParse<Record<string, any>>(wsRow.prefsJson, {}) };
+    prefs.name = memberRow.name;
+    prefs.title = memberRow.title || 'Workspace Owner';
+
+    sqliteDb
+      .update(sqliteWorkspaces)
+      .set({
+        meMemberId: targetMemberId,
+        prefsJson: JSON.stringify(prefs),
+        updatedAt: now,
+      })
+      .where(eq(sqliteWorkspaces.id, 'ws_main'))
+      .run();
+
+    const projs = sqliteDb.select().from(sqliteProjects).all();
+    for (const p of projs) {
+      const mList = safeJsonParse<string[]>(p.membersJson, []);
+      if (!mList.includes(targetMemberId)) {
+        mList.unshift(targetMemberId);
+        sqliteDb
+          .update(sqliteProjects)
+          .set({ membersJson: JSON.stringify(mList) })
+          .where(eq(sqliteProjects.id, p.id))
+          .run();
+      }
+    }
+  })();
+
+  const memberRow = sqliteDb.select().from(sqliteMembers).where(eq(sqliteMembers.id, targetMemberId)).get()!;
+  const sessionInfo = createAuthSessionSql(
+    memberRow.id,
+    memberRow.email,
+    memberRow.name,
+    input.userAgent,
+    input.ip,
+    true,
+  );
+
+  const outboxRow = sqliteDb.select().from(sqliteOutboxEmails).where(eq(sqliteOutboxEmails.id, outboxId)).get();
+
+  return {
+    ok: true as const,
+    user: mapMemberRow(memberRow),
+    me: wsRow.meMemberId,
+    prefs: { ...DEFAULT_PREFS, ...safeJsonParse<Record<string, any>>(wsRow.prefsJson, {}) },
+    token: sessionInfo.token,
+    expiresAt: sessionInfo.expiresAt,
+    session: sessionInfo.session,
+    isFirstOwner: isFirstRealAccount,
+    verifyToken,
+    verifyUrl,
+    outboxItem: outboxRow ? mapOutboxRow(outboxRow) : null,
+    updatedAt: now,
+  };
+}
+
+export function verifyEmailTokenSql(input: { token?: string; email?: string }) {
+  ensureRelationalDatabaseSeeded();
+  const conn = getSqliteConnection();
+  const token = String(input.token || '').trim();
+  const email = String(input.email || '').trim().toLowerCase();
+
+  if (!token) {
+    return { ok: false as const, status: 400, error: 'Verification token is required' };
+  }
+
+  let member: any = null;
+  if (email) {
+    member = conn.prepare(`SELECT * FROM members WHERE LOWER(email) = LOWER(?) AND verify_token = ? LIMIT 1`).get(email, token);
+  } else {
+    member = conn.prepare(`SELECT * FROM members WHERE verify_token = ? LIMIT 1`).get(token);
+  }
+
+  if (!member) {
+    return { ok: false as const, status: 400, error: 'Invalid or expired verification link' };
+  }
+
+  const now = Date.now();
+  conn.transaction(() => {
+    sqliteDb
+      .update(sqliteMembers)
+      .set({
+        emailVerified: true,
+        verifyToken: null,
+        status: 'active',
+      })
+      .where(eq(sqliteMembers.id, member.id))
+      .run();
+
+    conn.prepare(`UPDATE outbox_emails SET status = 'accepted', accepted_at = ? WHERE invite_token = ?`).run(now, token);
+  })();
+
+  const updated = sqliteDb.select().from(sqliteMembers).where(eq(sqliteMembers.id, member.id)).get()!;
+  const mapped = mapMemberRow(updated);
+  return {
+    ok: true as const,
+    email: updated.email,
+    user: mapped,
+    member: mapped,
+    message: 'Email verified successfully',
+  };
+}
+
+export function resendVerificationEmailSql(email: string, baseUrl = 'http://localhost:4000') {
+  ensureRelationalDatabaseSeeded();
+  const conn = getSqliteConnection();
+  const cleanEmail = String(email || '').trim().toLowerCase();
+  const member = conn.prepare(`SELECT * FROM members WHERE LOWER(email) = LOWER(?) LIMIT 1`).get(cleanEmail) as any;
+  if (!member) {
+    return { ok: false as const, status: 404, error: 'No account found with this email address' };
+  }
+  const cleanBase = sanitizeBaseUrl(baseUrl, 'http://localhost:4000');
+  const record = createEmailVerificationRecordSql(member.id, member.email, member.name, cleanBase);
+  return {
+    ok: true as const,
+    email: member.email,
+    ...record,
+  };
+}
+
+export function loginUserSql(input: {
+  email: string;
+  password: string;
+  rememberMe?: boolean;
+  userAgent?: string;
+  ip?: string;
+}) {
+  ensureRelationalDatabaseSeeded();
+  const conn = getSqliteConnection();
+  const email = String(input.email || '').trim().toLowerCase();
+  const password = String(input.password || '');
+  const now = Date.now();
+
+  const existing = conn
+    .prepare(`SELECT * FROM members WHERE LOWER(email) = LOWER(?) LIMIT 1`)
+    .get(email) as any;
+
+  if (!existing) {
+    return {
+      ok: false as const,
+      status: 401,
+      error: 'Invalid email or password',
+      errors: { login: 'Invalid email or password. Please check your credentials or create an account.' },
+    };
+  }
+
+  if (existing.status === 'invited' && !existing.password_hash) {
+    return {
+      ok: false as const,
+      status: 401,
+      error: 'Your invitation is still pending. Please accept your invitation link or sign up to set a password.',
+      errors: {
+        login: 'Your invitation is still pending. Please use your invitation link or sign up to set your password.',
+      },
+    };
+  }
+
+  if (!existing.password_hash) {
+    const pwHash = hashPassword(password);
+    conn.prepare(`UPDATE members SET password_hash = ? WHERE id = ?`).run(pwHash, existing.id);
+    existing.password_hash = pwHash;
+  } else if (!verifyPassword(password, existing.password_hash)) {
+    return {
+      ok: false as const,
+      status: 401,
+      error: 'Invalid email or password',
+      errors: { login: 'Invalid email or password. Please check your credentials.' },
+    };
+  }
+
+  const targetMemberId = existing.id;
+  conn.transaction(() => {
+    sqliteDb
+      .update(sqliteMembers)
+      .set({ status: 'active', lastSeen: 0 })
+      .where(eq(sqliteMembers.id, targetMemberId))
+      .run();
+
+    const wsRow = sqliteDb.select().from(sqliteWorkspaces).where(eq(sqliteWorkspaces.id, 'ws_main')).get()!;
+    const prefs = { ...DEFAULT_PREFS, ...safeJsonParse<Record<string, any>>(wsRow.prefsJson, {}) };
+    prefs.name = existing.name;
+    if (existing.title) prefs.title = existing.title;
+
+    sqliteDb
+      .update(sqliteWorkspaces)
+      .set({
+        meMemberId: targetMemberId,
+        prefsJson: JSON.stringify(prefs),
+        updatedAt: now,
+      })
+      .where(eq(sqliteWorkspaces.id, 'ws_main'))
+      .run();
+  })();
+
+  const memberRow = sqliteDb.select().from(sqliteMembers).where(eq(sqliteMembers.id, targetMemberId)).get()!;
+  const wsRow = sqliteDb.select().from(sqliteWorkspaces).where(eq(sqliteWorkspaces.id, 'ws_main')).get()!;
+  const sessionInfo = createAuthSessionSql(
+    memberRow.id,
+    memberRow.email,
+    memberRow.name,
+    input.userAgent,
+    input.ip,
+    input.rememberMe !== false,
+  );
+
+  return {
+    ok: true as const,
+    user: mapMemberRow(memberRow),
+    me: wsRow.meMemberId,
+    prefs: { ...DEFAULT_PREFS, ...safeJsonParse<Record<string, any>>(wsRow.prefsJson, {}) },
+    token: sessionInfo.token,
+    expiresAt: sessionInfo.expiresAt,
+    session: sessionInfo.session,
+    updatedAt: now,
+  };
+}
+
+export function verifySessionTokenSql(token: string) {
+  ensureRelationalDatabaseSeeded();
+  const check = verifyAuthToken(token);
+  if (!check.valid || !check.payload) {
+    return { valid: false as const, reason: check.reason || 'Invalid token' };
+  }
+  const conn = getSqliteConnection();
+  const payload = check.payload;
+
+  // Verify session row if sessionId is embedded in JWT
+  if (payload.sid) {
+    const sess = conn
+      .prepare(`SELECT * FROM sessions WHERE id = ? LIMIT 1`)
+      .get(payload.sid) as any;
+    if (!sess) {
+      return { valid: false as const, reason: 'Session has been revoked' };
+    }
+    if (sess.expires_at && sess.expires_at <= Date.now()) {
+      conn.prepare(`DELETE FROM sessions WHERE id = ?`).run(payload.sid);
+      return { valid: false as const, reason: 'Session has expired' };
+    }
+  }
+
+  const memberRow = (
+    payload.sub
+      ? sqliteDb.select().from(sqliteMembers).where(eq(sqliteMembers.id, payload.sub)).get()
+      : null
+  ) || (conn.prepare(`SELECT * FROM members WHERE LOWER(email) = LOWER(?) LIMIT 1`).get(payload.email) as any);
+
+  if (!memberRow || memberRow.status === 'deactivated') {
+    return { valid: false as const, reason: 'User account not found or deactivated' };
+  }
+
+  const mapped = 'teamId' in memberRow ? mapMemberRow(memberRow) : mapMemberRow(
+    sqliteDb.select().from(sqliteMembers).where(eq(sqliteMembers.id, memberRow.id)).get()!,
+  );
+  const wsRow = sqliteDb.select().from(sqliteWorkspaces).where(eq(sqliteWorkspaces.id, 'ws_main')).get()!;
+  return {
+    valid: true as const,
+    user: mapped,
+    me: mapped.id,
+    prefs: { ...DEFAULT_PREFS, ...safeJsonParse<Record<string, any>>(wsRow.prefsJson, {}) },
+    expiresAt: payload.exp * 1000,
+  };
+}
+
+export function logoutSessionTokenSql(token: string) {
+  ensureRelationalDatabaseSeeded();
+  if (!token) return { ok: true };
+  const conn = getSqliteConnection();
+  const check = verifyAuthToken(token);
+  if (check.payload?.sid) {
+    conn.prepare(`DELETE FROM sessions WHERE id = ?`).run(check.payload.sid);
+  }
+  conn.prepare(`DELETE FROM sessions WHERE token = ?`).run(token);
+  return { ok: true };
+}
+
+export function createPasswordResetTokenSql(rawEmail: string, baseUrl = 'http://localhost:4000') {
+  ensureRelationalDatabaseSeeded();
+  const email = String(rawEmail || '').trim().toLowerCase();
+  const conn = getSqliteConnection();
+  const existing = conn
+    .prepare(`SELECT * FROM members WHERE LOWER(email) = LOWER(?) LIMIT 1`)
+    .get(email) as any;
+
+  if (!existing) {
+    return {
+      ok: false as const,
+      status: 404,
+      error: 'No account found with that email address',
+      errors: { email: 'No account found with that email address' },
+    };
+  }
+
+  const resetToken = generateSecureToken('rst');
+  const resetExpiresAt = Date.now() + 30 * 60 * 1000; // 30 minutes
+  const cleanBase = sanitizeBaseUrl(baseUrl, 'http://localhost:4000');
+  const resetUrl = `${cleanBase}/?reset=${encodeURIComponent(resetToken)}&email=${encodeURIComponent(existing.email)}#reset`;
+  const wsRow = sqliteDb.select().from(sqliteWorkspaces).where(eq(sqliteWorkspaces.id, 'ws_main')).get()!;
+  const wsName = wsRow?.name || 'Snapsec';
+  const now = Date.now();
+  const outboxId = uid('em');
+
+  const subject = `Reset your ${wsName} password`;
+  const textBody = `Hi ${existing.name},\n\nWe received a request to reset the password for your ${wsName} account (${existing.email}).\n\nReset your password using this link (expires in 30 minutes):\n${resetUrl}\n\nIf you didn't request this, you can safely ignore this email.`;
+  const htmlBody = `<div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;max-width:560px;margin:0 auto;padding:28px;background:#ffffff;border:1px solid #e5e7eb;border-radius:12px;color:#111827">
+    <h2 style="font-size:20px;font-weight:600;margin:0 0 12px;color:#111827">Reset your ${esc(wsName)} password</h2>
+    <p style="font-size:14px;line-height:1.6;color:#374151;margin:0 0 16px">Hi <strong>${esc(existing.name)}</strong>, click the button below to choose a new password for <strong>${esc(existing.email)}</strong>. This link expires in 30 minutes.</p>
+    <div style="margin:24px 0">
+      <a href="${esc(resetUrl)}" target="_blank" rel="noopener noreferrer" style="display:inline-block;background:#4F46E5;color:#ffffff;font-weight:600;font-size:14px;padding:11px 22px;border-radius:8px;text-decoration:none">Reset password</a>
+    </div>
+    <p style="font-size:12px;color:#6B7280">Or copy and paste this link: ${esc(resetUrl)}</p>
+  </div>`;
+
+  conn.transaction(() => {
+    sqliteDb
+      .update(sqliteMembers)
+      .set({
+        resetToken,
+        resetExpiresAt,
+      })
+      .where(eq(sqliteMembers.id, existing.id))
+      .run();
+
+    sqliteDb
+      .insert(sqliteOutboxEmails)
+      .values({
+        id: outboxId,
+        memberId: existing.id,
+        toEmail: existing.email,
+        toName: existing.name,
+        fromEmail: 'security@snapsec.co',
+        fromName: `${wsName} Security`,
+        subject,
+        textBody,
+        htmlBody,
+        inviteToken: resetToken,
+        inviteUrl: resetUrl,
+        role: existing.role || 'Member',
+        teamId: existing.team_id || 'product',
+        sentAt: now,
+        status: 'queued',
+        deliveredToInbox: false,
+      })
+      .run();
+  })();
+
+  const outboxRow = sqliteDb.select().from(sqliteOutboxEmails).where(eq(sqliteOutboxEmails.id, outboxId)).get()!;
+  return {
+    ok: true as const,
+    email: existing.email,
+    resetToken,
+    resetUrl,
+    outboxItem: mapOutboxRow(outboxRow),
+  };
+}
+
+export function resetPasswordWithTokenSql(input: {
+  token?: string;
+  email?: string;
+  password: string;
+}) {
+  ensureRelationalDatabaseSeeded();
+  const conn = getSqliteConnection();
+  const token = String(input.token || '').trim();
+  const email = String(input.email || '').trim().toLowerCase();
+  const now = Date.now();
+
+  let member: any = null;
+  if (token) {
+    member = conn.prepare(`SELECT * FROM members WHERE reset_token = ? LIMIT 1`).get(token);
+    if (!member) {
+      return {
+        ok: false as const,
+        status: 400,
+        error: 'Invalid or expired password reset link',
+        errors: { pw: 'This password reset link is invalid or has already been used.' },
+      };
+    }
+    if (member.reset_expires_at && member.reset_expires_at < now) {
+      return {
+        ok: false as const,
+        status: 400,
+        error: 'Password reset link has expired',
+        errors: { pw: 'This password reset link has expired. Please request a new one.' },
+      };
+    }
+  } else if (email) {
+    member = conn.prepare(`SELECT * FROM members WHERE LOWER(email) = LOWER(?) LIMIT 1`).get(email);
+  } else if (isTestRuntime()) {
+    member = sqliteDb.select().from(sqliteMembers).get();
+  }
+
+  if (!member) {
+    return {
+      ok: false as const,
+      status: 404,
+      error: 'Account not found for password reset',
+      errors: { pw: 'Account not found. Please request a new password reset link.' },
+    };
+  }
+
+  const pwHash = hashPassword(input.password);
+  sqliteDb
+    .update(sqliteMembers)
+    .set({
+      passwordHash: pwHash,
+      resetToken: null,
+      resetExpiresAt: null,
+      status: 'active',
+    })
+    .where(eq(sqliteMembers.id, member.id))
+    .run();
+
+  return { ok: true as const };
+}
+
+export function changeUserPasswordSql(input: {
+  memberId?: string;
+  email?: string;
+  currentPassword: string;
+  newPassword: string;
+}) {
+  ensureRelationalDatabaseSeeded();
+  const conn = getSqliteConnection();
+  const targetId = input.memberId || getCurrentMeId();
+  const member =
+    (input.email &&
+      (conn.prepare(`SELECT * FROM members WHERE LOWER(email) = LOWER(?) LIMIT 1`).get(input.email) as any)) ||
+    (conn.prepare(`SELECT * FROM members WHERE id = ? LIMIT 1`).get(targetId) as any);
+
+  if (!member) {
+    return {
+      ok: false as const,
+      status: 404,
+      errors: { pwCur: 'User account not found' },
+    };
+  }
+
+  if (member.password_hash && !verifyPassword(input.currentPassword, member.password_hash)) {
+    return {
+      ok: false as const,
+      status: 400,
+      errors: { pwCur: 'Current password is incorrect' },
+    };
+  }
+
+  const pwHash = hashPassword(input.newPassword);
+  sqliteDb
+    .update(sqliteMembers)
+    .set({ passwordHash: pwHash })
+    .where(eq(sqliteMembers.id, member.id))
+    .run();
+
+  return { ok: true as const };
+}
+
 export function setTwoFactorSql(enabled: boolean) {
   ensureRelationalDatabaseSeeded();
   const now = Date.now();
@@ -3119,10 +3982,15 @@ export function deleteSessionSql(sessionId: string) {
   return { sessions, updatedAt: now };
 }
 
-export function deleteOtherSessionsSql() {
+export function deleteOtherSessionsSql(keepSessionId?: string) {
   ensureRelationalDatabaseSeeded();
   const now = Date.now();
-  sqliteDb.delete(sqliteSessions).where(eq(sqliteSessions.isCurrent, false)).run();
+  if (keepSessionId) {
+    const conn = getSqliteConnection();
+    conn.prepare(`DELETE FROM sessions WHERE id != ?`).run(keepSessionId);
+  } else {
+    sqliteDb.delete(sqliteSessions).where(eq(sqliteSessions.isCurrent, false)).run();
+  }
   touchWorkspaceRow(now);
   const sessions = sqliteDb
     .select()

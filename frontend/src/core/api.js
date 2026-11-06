@@ -3,20 +3,35 @@
    Connects the frontend workspace store and actions to the Express REST API
    ===================================================================== */
 
+import { clearAuthSession, getStoredAuthToken } from './auth.js';
+
 const API_BASE = (typeof import.meta !== 'undefined' && import.meta.env?.VITE_API_BASE_URL ? String(import.meta.env.VITE_API_BASE_URL) : '').replace(/\/+$/, '');
 
 async function request(path, options = {}) {
   const url = path.startsWith('http') ? path : `${API_BASE}${path}`;
+  const token = getStoredAuthToken();
+  const headers = {
+    'Content-Type': 'application/json',
+    ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    ...(options.headers || {}),
+  };
   const res = await fetch(url, {
-    headers: {
-      'Content-Type': 'application/json',
-      ...(options.headers || {}),
-    },
     ...options,
+    headers,
     body: options.body && typeof options.body !== 'string' ? JSON.stringify(options.body) : options.body,
   });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
+    if (res.status === 401 && !path.includes('/api/auth/login') && !path.includes('/api/auth/signup')) {
+      clearAuthSession();
+      if (typeof window !== 'undefined' && window.__snapsec) {
+        window.__snapsec.S.ui.auth = 'login';
+        try {
+          window.location.hash = 'login';
+        } catch {}
+        window.__snapsec.render();
+      }
+    }
     const err = new Error(data.error || `Request failed with status ${res.status}`);
     err.status = res.status;
     err.data = data;
@@ -28,6 +43,7 @@ async function request(path, options = {}) {
 export const api = {
   health: () => request('/api/health'),
   bootstrap: () => request('/api/bootstrap'),
+  checkSession: () => request('/api/auth/me'),
   metrics: () => request('/api/metrics'),
   syncState: payload =>
     request('/api/state', {
@@ -123,8 +139,18 @@ export const api = {
   signup: (name, email, password) => request('/api/auth/signup', { method: 'POST', body: { name, email, password } }),
   googleAuth: profile => request('/api/auth/google', { method: 'POST', body: profile }),
   forgotPassword: email => request('/api/auth/forgot', { method: 'POST', body: { email } }),
-  resetPassword: (password, confirmPassword) =>
-    request('/api/auth/reset', { method: 'POST', body: { password, confirmPassword } }),
+  resendVerification: email =>
+    request('/api/auth/resend-verification', {
+      method: 'POST',
+      body: { email, baseUrl: typeof window !== 'undefined' ? window.location.origin : 'http://localhost:4000' },
+    }),
+  verifyEmail: (token, email) =>
+    request('/api/auth/verify', {
+      method: 'POST',
+      body: { token, email },
+    }),
+  resetPassword: (password, confirmPassword, token, email) =>
+    request('/api/auth/reset', { method: 'POST', body: { password, confirmPassword, token, email } }),
   changePassword: (currentPassword, newPassword, confirmPassword) =>
     request('/api/auth/password', { method: 'POST', body: { currentPassword, newPassword, confirmPassword } }),
   toggle2fa: (enabled, code) => request('/api/auth/2fa', { method: 'POST', body: { enabled, code } }),

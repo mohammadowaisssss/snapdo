@@ -11,6 +11,7 @@ import { tlAfter } from '../views/timeline.js';
 import { renderLayer } from '../overlays/drawer.js';
 import { placePop } from '../overlays/popovers.js';
 import { renderAuth } from '../pages/auth.js';
+import { PUBLIC_AUTH_ROUTES, clearAuthSession, isAuthenticated } from '../core/auth.js';
 
 export const ROUTE_NAMES = {
   home: 'Home',
@@ -56,6 +57,25 @@ export const ROUTE_ICONS = {
 };
 
 export function go(route, params = {}, opt = {}) {
+  // If navigating to an auth route (login, signup, forgot, reset, etc.)
+  if (PUBLIC_AUTH_ROUTES.has(route)) {
+    S.ui.auth = route;
+    try { location.hash = route; } catch {}
+    render();
+    return;
+  }
+
+  // Security check: all non-auth pages require a valid, non-expired authentication token
+  if (!isAuthenticated()) {
+    clearAuthSession();
+    S.ui.auth = 'login';
+    try { location.hash = 'login'; } catch {}
+    render();
+    return;
+  }
+
+  // User is authenticated: proceed to workspace route
+  S.ui.auth = null;
   if (route === 'project' && !params.tab) params.tab = 'board';
   if (!opt.back) S.ui.history.push({ route: S.ui.route, params: S.ui.params });
   const same = S.ui.route === route && JSON.stringify(S.ui.params) === JSON.stringify(params);
@@ -123,6 +143,17 @@ export function makeFocusable() {
   }
 }
 export function render() {
+  // Security guard: If S.ui.auth is not set (i.e. rendering workspace) but user is not authenticated or token expired
+  if (!S.ui.auth && !isAuthenticated()) {
+    clearAuthSession();
+    S.ui.auth = 'login';
+    try {
+      location.hash = 'login';
+    } catch {
+      /* ignore */
+    }
+  }
+
   applyPrefs();
   const prevOv = render._ov || {};
   const ov = { pop: !!S.ui.pop, modals: S.ui.modals.length, drawer: S.ui.drawer, pal: !!S.ui.palette, sub: !!S.ui.subOpen };

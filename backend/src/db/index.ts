@@ -102,6 +102,11 @@ CREATE TABLE IF NOT EXISTS members (
   uid TEXT,
   name TEXT NOT NULL,
   email TEXT NOT NULL,
+  password_hash TEXT,
+  reset_token TEXT,
+  reset_expires_at REAL,
+  verify_token TEXT,
+  email_verified INTEGER NOT NULL DEFAULT 0,
   photo_url TEXT,
   role TEXT NOT NULL DEFAULT 'Member',
   team_id TEXT NOT NULL DEFAULT 'product',
@@ -119,6 +124,7 @@ CREATE INDEX IF NOT EXISTS idx_members_email ON members(email);
 CREATE INDEX IF NOT EXISTS idx_members_uid ON members(uid);
 CREATE INDEX IF NOT EXISTS idx_members_team ON members(team_id);
 CREATE INDEX IF NOT EXISTS idx_members_invite_token ON members(invite_token);
+CREATE INDEX IF NOT EXISTS idx_members_reset_token ON members(reset_token);
 
 CREATE TABLE IF NOT EXISTS projects (
   id TEXT PRIMARY KEY,
@@ -290,20 +296,38 @@ CREATE INDEX IF NOT EXISTS idx_outbox_token ON outbox_emails(invite_token);
 
 CREATE TABLE IF NOT EXISTS sessions (
   id TEXT PRIMARY KEY,
+  token TEXT,
+  member_id TEXT,
   device TEXT NOT NULL,
   loc TEXT NOT NULL,
   ip TEXT NOT NULL DEFAULT '',
   last_active TEXT NOT NULL DEFAULT 'Active now',
-  is_current INTEGER NOT NULL DEFAULT 0
+  is_current INTEGER NOT NULL DEFAULT 0,
+  created_at REAL,
+  expires_at REAL
 );
+CREATE INDEX IF NOT EXISTS idx_sessions_token ON sessions(token);
+CREATE INDEX IF NOT EXISTS idx_sessions_member ON sessions(member_id);
 `;
+
+const MIGRATION_COLUMNS = [
+  `ALTER TABLE members ADD COLUMN password_hash TEXT`,
+  `ALTER TABLE members ADD COLUMN reset_token TEXT`,
+  `ALTER TABLE members ADD COLUMN reset_expires_at REAL`,
+  `ALTER TABLE members ADD COLUMN verify_token TEXT`,
+  `ALTER TABLE members ADD COLUMN email_verified INTEGER NOT NULL DEFAULT 0`,
+  `ALTER TABLE sessions ADD COLUMN token TEXT`,
+  `ALTER TABLE sessions ADD COLUMN member_id TEXT`,
+  `ALTER TABLE sessions ADD COLUMN created_at REAL`,
+  `ALTER TABLE sessions ADD COLUMN expires_at REAL`,
+];
 
 /**
  * Initializes the SQLite connection with Write-Ahead Logging (WAL),
  * foreign keys, B-Tree indexes, and non-blocking normal synchronous mode.
  */
 export function getSqliteConnection(): Database.Database {
-  if (!global._sqliteInstance) {
+  if (!global._sqliteInstance || !global._sqliteInstance.open) {
     try {
       if (!fs.existsSync(DATA_DIR)) {
         fs.mkdirSync(DATA_DIR, { recursive: true });
@@ -324,7 +348,32 @@ export function getSqliteConnection(): Database.Database {
     sqlite.pragma('busy_timeout = 5000');
     sqlite.pragma('temp_store = MEMORY');
     sqlite.pragma('cache_size = -64000');
-    sqlite.exec(COMMON_SCHEMA_DDL);
+
+    // Run table creation and migration columns safely
+    for (const stmt of MIGRATION_COLUMNS) {
+      try {
+        sqlite.exec(stmt);
+      } catch {
+        /* table may not exist yet or column already exists */
+      }
+    }
+    const statements = COMMON_SCHEMA_DDL.split(';')
+      .map(s => s.trim())
+      .filter(Boolean);
+    for (const stmt of statements) {
+      try {
+        sqlite.exec(stmt);
+      } catch {
+        /* ignore benign duplicate index/table errors */
+      }
+    }
+    for (const stmt of MIGRATION_COLUMNS) {
+      try {
+        sqlite.exec(stmt);
+      } catch {
+        /* column already exists */
+      }
+    }
     global._sqliteInstance = sqlite;
   }
   return global._sqliteInstance;
@@ -333,7 +382,23 @@ export function getSqliteConnection(): Database.Database {
 let pgSchemaEnsured = false;
 export async function ensurePgSchema(pool: Pool): Promise<void> {
   if (pgSchemaEnsured) return;
-  await pool.query(COMMON_SCHEMA_DDL);
+  const statements = COMMON_SCHEMA_DDL.split(';')
+    .map(s => s.trim())
+    .filter(Boolean);
+  for (const stmt of statements) {
+    try {
+      await pool.query(stmt);
+    } catch {
+      /* ignore benign duplicate errors */
+    }
+  }
+  for (const stmt of MIGRATION_COLUMNS) {
+    try {
+      await pool.query(stmt);
+    } catch {
+      /* column already exists */
+    }
+  }
   pgSchemaEnsured = true;
 }
 

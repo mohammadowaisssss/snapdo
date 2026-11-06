@@ -55,6 +55,7 @@ import './actions/teams.js';
 import './actions/subtasks.js';
 import './actions/archive.js';
 import { api } from './core/api.js';
+import { clearAuthSession, getStoredAuthToken, isAuthenticated, PUBLIC_AUTH_ROUTES, saveAuthSession } from './core/auth.js';
 import { onFirebaseUserChanged } from './core/firebase.js';
 import { S, D, applyAuthenticatedUser, save, hydrateFromBackend } from './core/store.js';
 import { toast } from './ui/toast.js';
@@ -70,17 +71,121 @@ import { ROUTE_NAMES, render, go } from './shell/render.js';
     l.setAttribute('aria-live', 'polite');
     document.body.appendChild(l);
   }
+
+  // Frontend route security check
+  const qs = typeof location !== 'undefined' ? new URLSearchParams(location.search) : new URLSearchParams();
+  const resetTokenParam = qs.get('reset');
+  const verifyTokenParam = qs.get('verify');
+  const emailParam = qs.get('email');
+
   const h = (location.hash || '').slice(1);
-  const authRoutes = ['login', 'signup', 'forgot', 'reset', 'verify', 'onboarding'];
-  if (authRoutes.includes(h)) S.ui.auth = h;
-  else if (h && ROUTE_NAMES[h]) S.ui.route = h;
-  else S.ui.route = S.prefs.home || 'home';
+  if (resetTokenParam || h === 'reset') {
+    S.ui.auth = 'reset';
+    if (resetTokenParam) S.ui.af.resetToken = resetTokenParam;
+    if (emailParam) S.ui.af.email = emailParam;
+  } else if (verifyTokenParam || h === 'verify') {
+    S.ui.auth = 'verify';
+    if (emailParam) S.ui.af.email = emailParam;
+  } else if (PUBLIC_AUTH_ROUTES.has(h)) {
+    S.ui.auth = h;
+  } else if (!isAuthenticated()) {
+    // Unauthenticated user attempting to access workspace pages: redirect to login
+    clearAuthSession();
+    S.ui.auth = 'login';
+    try {
+      location.hash = 'login';
+    } catch {
+      /* ignore */
+    }
+  } else {
+    S.ui.auth = null;
+    if (h && (ROUTE_NAMES[h] || h === 'project' || h === 'member' || h === 'team')) {
+      S.ui.route = h;
+    } else {
+      S.ui.route = S.prefs.home || 'home';
+    }
+  }
+
+  // Listen to address bar and history hash transitions to prevent unauthorized URL access
+  window.addEventListener('hashchange', () => {
+    const raw = (location.hash || '').slice(1);
+    if (PUBLIC_AUTH_ROUTES.has(raw)) {
+      S.ui.auth = raw;
+      render();
+    } else if (!isAuthenticated()) {
+      clearAuthSession();
+      S.ui.auth = 'login';
+      try {
+        location.hash = 'login';
+      } catch {
+        /* ignore */
+      }
+      render();
+    } else {
+      S.ui.auth = null;
+      if (raw && (ROUTE_NAMES[raw] || raw === 'project' || raw === 'member' || raw === 'team')) {
+        go(raw);
+      } else {
+        go(S.prefs.home || 'home');
+      }
+    }
+  });
+
   render();
+
+  // If token is present, verify session validity with backend /api/auth/me
+  if (isAuthenticated()) {
+    api
+      .checkSession()
+      .then(res => {
+        if (res?.user) {
+          applyAuthenticatedUser(res.user);
+          render();
+        }
+      })
+      .catch(err => {
+        if (err?.status === 401) {
+          clearAuthSession();
+          S.ui.auth = 'login';
+          try {
+            location.hash = 'login';
+          } catch {
+            /* ignore */
+          }
+          render();
+        }
+      });
+  }
+
   hydrateFromBackend(() => {
-    const qs = new URLSearchParams(location.search);
-    const inviteToken = qs.get('invite');
-    const inviteEmail = qs.get('email');
-    if (inviteToken || inviteEmail) {
+    const params = new URLSearchParams(location.search);
+    const inviteToken = params.get('invite');
+    const inviteEmail = params.get('email');
+    const verifyToken = params.get('verify');
+    if (verifyToken) {
+      api
+        .verifyEmail(verifyToken, inviteEmail || undefined)
+        .then(res => {
+          if (res?.member) {
+            applyAuthenticatedUser({ name: res.member.name, email: res.member.email });
+            if (res.token) {
+              saveAuthSession(res.token, res.member, res.expiresAt);
+            }
+            S.ui.auth = 'onboarding';
+            S.ui.onb = 0;
+            try {
+              history.replaceState({}, '', location.pathname + (location.hash || ''));
+            } catch {
+              /* ignore */
+            }
+            render();
+            toast(`Email verified successfully! Welcome to Snapsec, ${res.member.name}!`);
+          }
+        })
+        .catch(err => {
+          toast(err?.message || 'Verification link expired or invalid', 'error');
+        });
+    } else if (inviteToken || inviteEmail) {
       api
         .acceptInvite({ token: inviteToken, email: inviteEmail })
         .then(res => {
@@ -100,6 +205,7 @@ import { ROUTE_NAMES, render, go } from './shell/render.js';
     }
     render();
   });
+
   onFirebaseUserChanged(profile => {
     if (profile && profile.email) {
       applyAuthenticatedUser({ ...profile, provider: 'Google' });
@@ -110,4 +216,17 @@ import { ROUTE_NAMES, render, go } from './shell/render.js';
 })();
 
 // Handle for debugging and verification tooling.
-window.__snapsec = { S, D, A, go, render, save, api, applyAuthenticatedUser };
+window.__snapsec = {
+  S,
+  D,
+  A,
+  go,
+  render,
+  save,
+  api,
+  applyAuthenticatedUser,
+  isAuthenticated,
+  clearAuthSession,
+  saveAuthSession,
+  getStoredAuthToken,
+};

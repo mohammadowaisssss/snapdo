@@ -8,6 +8,7 @@ import { seed } from '../data/seed.js';
 import { api } from '../core/api.js';
 import { applyMarkdownCommand, normalizeHtmlToMarkdown } from '../core/markdown.js';
 import { safeDownloadUrl, safeHref } from '../core/security.js';
+import { clearAuthSession, saveAuthSession } from '../core/auth.js';
 import { authorizeGmailSenderPopup, getGmailAccessToken, getGoogleSenderEmail, signInWithGooglePopup, signOutFromFirebase } from '../core/firebase.js';
 import { D, DEFAULT_PREFS, S, allTasks, applyAuthenticatedUser, canSee, commentsOf, logAct, me, mem, pColor, progressOf, proj, save, task, tasksOf, visibleProjects } from '../core/store.js';
 import { fileType, fsize } from '../ui/helpers.js';
@@ -2537,6 +2538,7 @@ A.newWorkspace = () => {
   render();
 };
 A.signOut = () => {
+  clearAuthSession();
   signOutFromFirebase();
   S.ui.pop = null;
   S.ui.palette = null;
@@ -2544,6 +2546,11 @@ A.signOut = () => {
   S.ui.modals = [];
   S.ui.auth = 'login';
   S.ui.errors = {};
+  try {
+    location.hash = 'login';
+  } catch {
+    /* ignore */
+  }
   render();
 };
 A.shortcuts = () => {
@@ -2878,7 +2885,7 @@ export function enterApp(msg) {
   go(S.prefs.home || 'home');
   toast(msg);
 }
-A.doLogin = () => {
+A.doLogin = async () => {
   const e = (S.ui.errors = {});
   const em = $('#l-email').value.trim(),
     pw = $('#l-pw').value;
@@ -2893,7 +2900,15 @@ A.doLogin = () => {
     return;
   }
   const member = applyAuthenticatedUser({ email: em });
-  api.login(em, pw).catch(() => {});
+  try {
+    const res = await api.login(em, pw);
+    if (res?.token) {
+      saveAuthSession(res.token, res.user || member || { email: em }, res.expiresAt);
+    }
+  } catch {
+    /* fallback to local session if network offline */
+    saveAuthSession(`snapsec-local.${btoa(JSON.stringify({ email: em, exp: Math.floor(Date.now() / 1000) + 7 * 86400 }))}.sig`, member || { email: em });
+  }
   loadingBtn('login-btn', 750, () => enterApp(`Signed in as ${member ? `${member.name} (${member.email})` : em}`));
 };
 A.socialAuth = async el => {
@@ -2905,7 +2920,12 @@ A.socialAuth = async el => {
     try {
       const profile = await signInWithGooglePopup();
       const member = applyAuthenticatedUser({ ...profile, provider: 'Google' });
-      await api.googleAuth(profile).catch(() => {});
+      const res = await api.googleAuth(profile).catch(() => ({}));
+      if (res?.token) {
+        saveAuthSession(res.token, res.user || member || profile, res.expiresAt);
+      } else {
+        saveAuthSession(`snapsec-google.${btoa(JSON.stringify({ email: profile.email, exp: Math.floor(Date.now() / 1000) + 7 * 86400 }))}.sig`, member || profile);
+      }
       enterApp(`Signed in as ${member?.name || profile.name} (${profile.email})`);
     } catch (err) {
       el.classList.remove('is-loading');
@@ -2922,6 +2942,7 @@ A.socialAuth = async el => {
   }
   const email = S.ui.af?.email || me()?.email || 'mohammadowais616@gmail.com';
   const member = applyAuthenticatedUser({ email, provider });
+  saveAuthSession(`snapsec-${provider.toLowerCase()}.${btoa(JSON.stringify({ email, exp: Math.floor(Date.now() / 1000) + 7 * 86400 }))}.sig`, member || { email });
   setTimeout(() => enterApp(`Signed in with ${provider} as ${member?.name || email}`), 600);
 };
 A.doSignup = () => {
@@ -2940,7 +2961,9 @@ A.doSignup = () => {
     return;
   }
   applyAuthenticatedUser({ name: nm, email: em });
-  api.signup(nm, em, pw).catch(() => {});
+  api.signup(nm, em, pw).then(res => {
+    if (res?.token) saveAuthSession(res.token, res.user || { name: nm, email: em }, res.expiresAt);
+  }).catch(() => {});
   loadingBtn('signup-btn', 800, () => {
     S.ui.auth = 'verify';
     startResend();
@@ -2960,12 +2983,30 @@ export function startResend() {
     }
   }, 1000);
 }
-A.resend = el => {
+A.resend = async el => {
   if (el.dataset.v === 'verify') {
     startResend();
     render();
-    toast(`Verification email sent to ${S.ui.af.email}`);
-  } else toast(`Reset link sent to ${S.ui.af.email}`);
+    const em = S.ui.af.email || S.user?.email;
+    try {
+      const res = await api.resendVerification(em);
+      if (res?.deliveredToInbox) {
+        toast(`Verification link sent via SMTP to ${em}`);
+      } else {
+        toast(`Verification link sent to ${em}`);
+      }
+    } catch (err) {
+      toast(err?.message || `Unable to send verification link to ${em}`, 'error');
+    }
+  } else {
+    const em = S.ui.af.email || S.user?.email;
+    try {
+      await api.forgotPassword(em);
+      toast(`Reset link sent to ${em}`);
+    } catch {
+      toast(`Reset link sent to ${em}`);
+    }
+  }
 };
 A.verified = () => {
   S.ui.auth = 'onboarding';
@@ -2989,7 +3030,7 @@ A.doForgot = () => {
     render();
   });
 };
-A.doReset = () => {
+A.doReset = async () => {
   const a = $('#r-pw').value,
     b = $('#r-pw2').value;
   const e = (S.ui.errors = {});
@@ -2999,12 +3040,19 @@ A.doReset = () => {
     render();
     return;
   }
-  api.resetPassword(a, b).catch(() => {});
-  loadingBtn('reset-btn', 700, () => {
-    S.ui.auth = 'reset-done';
-    S.ui.pwNew = '';
+  const token = S.ui.af.resetToken || (typeof location !== 'undefined' ? (new URLSearchParams(location.search).get('reset') || new URLSearchParams(location.search).get('token')) : null);
+  const email = S.ui.af.email || (typeof location !== 'undefined' ? new URLSearchParams(location.search).get('email') : null);
+  try {
+    await api.resetPassword(a, b, token, email);
+    loadingBtn('reset-btn', 700, () => {
+      S.ui.auth = 'reset-done';
+      S.ui.pwNew = '';
+      render();
+    });
+  } catch (err) {
+    e.pw2 = err?.message || 'Failed to reset password. Link may have expired.';
     render();
-  });
+  }
 };
 
 /* onboarding */
