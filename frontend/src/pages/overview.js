@@ -43,8 +43,8 @@ export function pageOverview() {
       </section>
       <div class="stack">
         <section class="panel"><div class="panel-h"><h2>Tasks by status</h2></div><div class="panel-b">
-          <div class="stackbar" style="height:10px;margin-bottom:12px">${counts.map(c => `<i style="width:${(c.n / Math.max(all.length, 1)) * 100}%;background:var(--st-${c.s.id})" title="${c.s.name}: ${c.n}"></i>`).join('')}</div>
-          ${counts.map(c => `<div class="row" style="height:28px;font-size:13px">${stIcon(c.s.id)}<span class="grow">${c.s.name}</span><span class="num muted">${c.n}</span><span class="num faint" style="width:36px;text-align:right">${Math.round((c.n / Math.max(all.length, 1)) * 100)}%</span></div>`).join('')}
+          <div class="stackbar" style="height:10px;margin-bottom:12px">${counts.map(c => `<i style="width:${(c.n / Math.max(all.length, 1)) * 100}%;background:${c.s.c || `var(--st-${c.s.id}, var(--accent))`}" title="${esc(c.s.name)}: ${c.n}"></i>`).join('')}</div>
+          ${counts.map(c => `<div class="row" style="height:28px;font-size:13px">${stIcon(c.s.id)}<span class="grow">${esc(c.s.name)}</span><span class="num muted">${c.n}</span><span class="num faint" style="width:36px;text-align:right">${Math.round((c.n / Math.max(all.length, 1)) * 100)}%</span></div>`).join('')}
         </div></section>
         <section class="panel"><div class="panel-h"><h2>Workload</h2><div class="acts"><span class="faint" style="font-size:11.5px">Open tasks per person</span></div></div><div class="panel-b">
           ${load
@@ -55,7 +55,7 @@ export function pageOverview() {
                 )
                   .map(s => {
                     const n = l.ts.filter(t => t.status === s.id).length;
-                    return n ? `<i style="display:block;flex:${n};background:var(--st-${s.id})"></i>` : '';
+                    return n ? `<i style="display:block;flex:${n};background:${s.c || `var(--st-${s.id}, var(--accent))`}"></i>` : '';
                   })
                   .join('')}</span></span><span class="num muted" style="width:22px;text-align:right">${l.ts.length}</span></div>`,
             )

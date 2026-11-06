@@ -26,17 +26,23 @@ export function avStack(ids, max = 4, cls = 'sm') {
   return `<span class="avs">${v.map(i => av(i, cls)).join('')}${ids.length > max ? `<span class="av ${cls} more" style="--c:var(--gray)">+${ids.length - max}</span>` : ''}</span>`;
 }
 export function stIcon(st, s = 14) {
-  const c = `var(--st-${st})`;
+  const info = ST[st] || { id: st, name: st || 'To Do', c: '#6B7280', kind: st };
+  const c = info.c || `var(--st-${st}, var(--accent))`;
+  const kind = info.kind || st;
   const r = 5.4;
   let inner = '';
-  if (st === 'backlog') inner = `<circle cx="7" cy="7" r="${r}" fill="none" stroke="${c}" stroke-width="1.5" stroke-dasharray="1.9 2.1"/>`;
-  else if (st === 'todo') inner = `<circle cx="7" cy="7" r="${r}" fill="none" stroke="${c}" stroke-width="1.5"/>`;
-  else if (st === 'progress')
+  if (kind === 'backlog' || st === 'backlog')
+    inner = `<circle cx="7" cy="7" r="${r}" fill="none" stroke="${c}" stroke-width="1.5" stroke-dasharray="1.9 2.1"/>`;
+  else if (kind === 'todo' || st === 'todo')
+    inner = `<circle cx="7" cy="7" r="${r}" fill="none" stroke="${c}" stroke-width="1.5"/>`;
+  else if (kind === 'progress' || st === 'progress')
     inner = `<circle cx="7" cy="7" r="${r}" fill="none" stroke="${c}" stroke-width="1.5"/><path d="M7 3.4A3.6 3.6 0 0 1 7 10.6Z" fill="${c}"/>`;
-  else if (st === 'review')
+  else if (kind === 'review' || st === 'review')
     inner = `<circle cx="7" cy="7" r="${r}" fill="none" stroke="${c}" stroke-width="1.5"/><path d="M7 3.4A3.6 3.6 0 1 1 3.4 7L7 7Z" fill="${c}"/>`;
-  else
+  else if (kind === 'done' || st === 'done')
     inner = `<circle cx="7" cy="7" r="6.2" fill="${c}"/><path d="M4.4 7.2 6.2 9 9.7 5.3" fill="none" stroke="var(--surface)" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>`;
+  else
+    inner = `<circle cx="7" cy="7" r="${r}" fill="none" stroke="${c}" stroke-width="1.5"/><circle cx="7" cy="7" r="2.4" fill="${c}"/>`;
   return `<svg width="${s}" height="${s}" viewBox="0 0 14 14" aria-hidden="true" style="flex-shrink:0">${inner}</svg>`;
 }
 export function prIcon(p, s = 14) {
@@ -48,7 +54,7 @@ export function prIcon(p, s = 14) {
   const bar = (x, h, on) => `<rect x="${x}" y="${12 - h}" width="2.6" height="${h}" rx="1" fill="${on ? 'var(--text-2)' : 'var(--border-strong)'}"/>`;
   return `<svg width="${s}" height="${s}" viewBox="0 0 14 14" aria-hidden="true" style="flex-shrink:0">${bar(1.8, 4.5, w >= 1)}${bar(5.7, 7.5, w >= 2)}${bar(9.6, 10.5, w >= 3)}</svg>`;
 }
-export const stPill = st => `${stIcon(st)}<span>${ST[st].name}</span>`;
+export const stPill = st => `${stIcon(st)}<span>${esc(ST[st].name)}</span>`;
 export const prPill = p => `${prIcon(p)}<span>${PR[p || 'none'].name}</span>`;
 export const lbl = id => (LB[id] ? `<span class="lbl" style="--c:${LB[id].c}"><i></i>${LB[id].name}</span>` : '');
 export const pIcon = (p, cls = '', s = 15) => `<span class="picon ${cls}" style="--c:${pColor(p)}">${ic(p.icon, s)}</span>`;
@@ -100,6 +106,10 @@ export function mdToolbar(targetId, previewKey = '') {
           `<button type="button" class="ibtn ibtn-xs" data-a="mdFmt" data-target="${targetId}" data-cmd="${cmd}" data-tip="${tip}" aria-label="${tip}">${ic(icon, 13)}</button>`,
       )
       .join('')}
+    <label class="ibtn ibtn-xs" style="cursor:pointer" data-tip="Insert inline image or screenshot" aria-label="Insert inline image">
+      ${ic('image', 13)}
+      <input type="file" accept="image/*" multiple data-in="mdInlineImage" data-target="${targetId}" hidden>
+    </label>
     ${
       previewKey
         ? `<span class="sp"></span><button type="button" class="btn btn-xs ${isPrev ? 'btn-secondary' : 'btn-ghost'}" data-a="toggleMdPreview" data-k="${previewKey}" title="Toggle Markdown preview">${ic('eye', 12)}${isPrev ? 'Edit' : 'Preview'}</button>`

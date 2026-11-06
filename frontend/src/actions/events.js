@@ -5,7 +5,7 @@ import { $$ } from '../core/utils.js';
 import { D, S, task } from '../core/store.js';
 import { toast } from '../ui/toast.js';
 import { render } from '../shell/render.js';
-import { A, BLUR, DBL, IN, curProjectId, handleFiles, readFileToRecord, stageCommentFiles } from './actions.js';
+import { A, BLUR, DBL, IN, curProjectId, handleFiles, insertFilesInlineInDescription, readFileToRecord, stageCommentFiles } from './actions.js';
 
 document.addEventListener(
   'click',
@@ -102,8 +102,16 @@ document.addEventListener('paste', async e => {
   if (!pastedFiles.length) return;
   e.preventDefault();
 
-  // 1. Inside a comment box (#d-cmt, #inbox-reply, or .cbox)
-  const cbox = e.target?.closest?.('[data-comment-box], .cbox');
+  // 1. Inside a description editor (#f-desc, #d-desc, or [data-desc-box])
+  const descBox = e.target?.closest?.('[data-desc-box]');
+  if (descBox || e.target?.id === 'f-desc' || e.target?.id === 'd-desc') {
+    const targetId = e.target?.id === 'f-desc' || descBox?.dataset?.descBox === '__form' ? 'f-desc' : 'd-desc';
+    await insertFilesInlineInDescription(pastedFiles, targetId);
+    return;
+  }
+
+  // 2. Explicitly inside a comment box ([data-comment-box], #d-cmt, or #inbox-reply)
+  const cbox = e.target?.closest?.('[data-comment-box]');
   if (cbox || e.target?.id === 'd-cmt' || e.target?.id === 'inbox-reply') {
     const tid =
       e.target?.dataset?.id ||
@@ -116,22 +124,20 @@ document.addEventListener('paste', async e => {
     }
   }
 
-  // 2. Inside the New/Edit Task Modal
+  // 3. Inside the New/Edit Task Modal (any focus inside the modal) -> inline images in description & attach
   const topModal = S.ui.modals?.[S.ui.modals.length - 1];
   if (topModal && topModal.type === 'task' && S.ui.form) {
-    const recs = await Promise.all(pastedFiles.map(readFileToRecord));
-    S.ui.form.files.push(...recs);
-    render();
-    toast(recs.length === 1 ? `Pasted ${recs[0].name} into task` : `Pasted ${recs.length} files into task`, { ms: 1800 });
+    await insertFilesInlineInDescription(pastedFiles, 'f-desc');
     return;
   }
 
-  // 3. When a Task Drawer is open
+  // 4. When a Task Drawer is open (and not focused inside the comment box) -> inline images in task description!
   if (S.ui.drawer && task(S.ui.drawer)) {
-    const t = task(S.ui.drawer);
-    if (S.ui.drawerTab === 'comments') {
-      await stageCommentFiles(pastedFiles, t.id);
+    const hasImages = pastedFiles.some(f => f.type?.startsWith('image/') || /\.(png|jpe?g|gif|webp)$/i.test(f.name || ''));
+    if (hasImages || S.ui.descEdit === S.ui.drawer) {
+      await insertFilesInlineInDescription(pastedFiles, 'd-desc');
     } else {
+      const t = task(S.ui.drawer);
       await handleFiles(pastedFiles, { project: t.project, task: t.id });
     }
     return;

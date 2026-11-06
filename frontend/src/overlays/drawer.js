@@ -80,7 +80,7 @@ export function drawerHtml(t) {
         ${prop('git-branch', 'Blocked by', `<button class="pillbtn ${t.deps.length ? '' : 'empty'}" data-a="pop" data-pop="deps" data-id="${t.id}" style="height:auto;min-height:26px;flex-wrap:wrap">${t.deps.length ? t.deps.map(d => (task(d) ? `<span class="depchip mono" style="font-size:11px;padding:1px 5px;border-radius:4px;background:var(--surface-3)">${task(d).key}</span><span class="trunc" style="max-width:160px">${esc(task(d).title)}</span>` : '')).join('') : ic('git-branch', 13) + 'None'}</button>`)}
       </dl>
 
-      <div class="dsec"><div class="dsec-h"><h3 id="d-desc-l">Description</h3><span class="faint" style="font-size:11px">Markdown</span><span class="sp"></span>
+      <div class="dsec"><div class="dsec-h"><h3 id="d-desc-l">Description</h3><span class="faint" style="font-size:11px">Markdown · Paste images inline (${MOD}+V)</span><span class="sp"></span>
         ${
           isEditingDesc
             ? `<button type="button" class="btn btn-xs btn-primary" data-a="finishTaskDesc" data-id="${t.id}">${ic('check', 12)}Done</button>`
@@ -89,8 +89,18 @@ export function drawerHtml(t) {
       </div>
         ${
           isEditingDesc
-            ? `<div class="cbox" style="padding:6px 10px">${mdToolbar('d-desc')}<textarea class="textarea" id="d-desc" data-in="taskDesc" data-id="${t.id}" rows="4" data-autosize placeholder="Add a description… Supports Markdown (**bold**, *italic*, \`code\`, - [ ] checklists, tables)" aria-labelledby="d-desc-l" style="border:0;padding:4px 0;background:transparent">${esc(normalizeHtmlToMarkdown(t.desc || ''))}</textarea></div>`
-            : `<div class="rte"><div class="rte-body md-body" id="d-desc" data-a="editTaskDesc" data-id="${t.id}" role="button" tabindex="0" aria-labelledby="d-desc-l" style="cursor:text">${t.desc && t.desc.trim() ? md(t.desc) : '<span class="faint">Add a description… (click to write with Markdown)</span>'}</div></div>`
+            ? `<div class="cbox desc-box" data-desc-box="${t.id}" style="padding:6px 10px">${mdToolbar('d-desc', 'desc:' + t.id)}${
+                u.mdPrev?.['desc:' + t.id]
+                  ? `<div class="md-body md-preview-box" style="min-height:80px">${(t.desc || '').trim() ? md(t.desc) : '<span class="faint">Nothing to preview yet…</span>'}</div>`
+                  : `<textarea class="textarea" id="d-desc" data-in="taskDesc" data-id="${t.id}" rows="4" data-autosize placeholder="Add a description… Supports Markdown (**bold**, *italic*, \`code\`, - [ ] checklists, tables) and inline pasted screenshots (${MOD}+V)" aria-labelledby="d-desc-l" style="border:0;padding:4px 0;background:transparent">${esc(normalizeHtmlToMarkdown(t.desc || ''))}</textarea>${
+                      /!\[[^\]]*\]\((data:image\/[^)]+)\)/.test(t.desc || '')
+                        ? `<div class="desc-inline-imgs" style="margin-top:6px;padding-top:6px;border-top:1px dashed var(--border)"><div class="faint" style="font-size:11px;margin-bottom:4px">Inline images in description:</div><div class="md-body">${md(
+                            (t.desc || '').match(/!\[[^\]]*\]\((data:image\/[^)]+)\)/g)?.join('\n\n') || '',
+                          )}</div></div>`
+                        : ''
+                    }`
+              }</div>`
+            : `<div class="rte"><div class="rte-body md-body" id="d-desc" data-a="editTaskDesc" data-id="${t.id}" role="button" tabindex="0" aria-labelledby="d-desc-l" style="cursor:text">${t.desc && t.desc.trim() ? md(t.desc) : `<span class="faint">Add a description… (click to write with Markdown or paste screenshots with ${MOD}+V)</span>`}</div></div>`
         }
       </div>
 

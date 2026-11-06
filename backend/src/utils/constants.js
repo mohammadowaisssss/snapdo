@@ -1,12 +1,33 @@
 /* ---------- vocab ---------- */
-export const STATUSES = [
-  { id: 'backlog', name: 'Backlog' },
-  { id: 'todo', name: 'To Do' },
-  { id: 'progress', name: 'In Progress' },
-  { id: 'review', name: 'Review' },
-  { id: 'done', name: 'Done' },
+export const DEFAULT_STATUSES = [
+  { id: 'backlog', name: 'Backlog', c: '#8A867E', kind: 'backlog' },
+  { id: 'todo', name: 'To Do', c: '#6B7280', kind: 'todo' },
+  { id: 'progress', name: 'In Progress', c: '#3B82C4', kind: 'progress' },
+  { id: 'review', name: 'Review', c: '#C48A1E', kind: 'review' },
+  { id: 'done', name: 'Done', c: '#3D8E5F', kind: 'done' },
 ];
+export const STATUSES = DEFAULT_STATUSES.map(s => ({ ...s }));
 export const ST = Object.fromEntries(STATUSES.map(s => [s.id, s]));
+export function syncStatuses(customList) {
+  const source = Array.isArray(customList) && customList.length > 0 ? customList : DEFAULT_STATUSES;
+  const normalized = source
+    .filter(s => s && typeof s.id === 'string' && s.id.trim() && typeof s.name === 'string' && s.name.trim())
+    .map(s => {
+      const id = String(s.id).trim();
+      const def = DEFAULT_STATUSES.find(d => d.id === id);
+      return {
+        id,
+        name: String(s.name).trim(),
+        c: String(s.c || def?.c || '#5A67D8').trim(),
+        kind: String(s.kind || def?.kind || (id === 'done' ? 'done' : 'todo')).trim(),
+      };
+    });
+  const next = normalized.length > 0 ? normalized : DEFAULT_STATUSES.map(s => ({ ...s }));
+  STATUSES.splice(0, STATUSES.length, ...next);
+  for (const k of Object.keys(ST)) delete ST[k];
+  for (const s of STATUSES) ST[s.id] = s;
+  return STATUSES;
+}
 export const PRIOS = [
   { id: 'urgent', name: 'Urgent', w: 4 },
   { id: 'high', name: 'High', w: 3 },

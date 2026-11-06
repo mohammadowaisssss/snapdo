@@ -1,5 +1,5 @@
 import { seed } from '../db/seed.js';
-import { PCOLORS, PR, PSTAT, ST, TEAMS_SEED } from '../utils/constants.js';
+import { DEFAULT_STATUSES, PCOLORS, PR, PSTAT, ST, TEAMS_SEED, syncStatuses } from '../utils/constants.js';
 import { TODAY, addD, dOff, diffD, esc, fmtDate, iso, parse, uid } from '../utils/utils.js';
 import {
   isSafeEmoji,
@@ -142,6 +142,10 @@ export function createDefaultState(): PersistedStore {
   if (!data.teams) {
     data.teams = TEAMS_SEED.map((t: any) => ({ ...t }));
   }
+  if (!Array.isArray(data.statuses) || !data.statuses.length) {
+    data.statuses = DEFAULT_STATUSES.map((s: any) => ({ ...s }));
+  }
+  syncStatuses(data.statuses);
   return {
     data,
     prefs: { ...DEFAULT_PREFS },
@@ -256,10 +260,12 @@ export function createTaskRecord(data: any, rawInput: Record<string, any>) {
     data.projects[0];
   const maxOrder = Math.max(0, ...(data.tasks || []).map((t: any) => Number(t.order) || 0));
   const now = Date.now();
+  const rawStatus = typeof input.status === 'string' ? input.status.trim() : '';
+  const validStatus = rawStatus && ((ST as any)[rawStatus] || /^[a-z0-9_-]{1,50}$/i.test(rawStatus)) ? rawStatus : 'todo';
   const newTask: any = {
     project: p.id,
     title: safeString(input.title, 500, 'Untitled') || 'Untitled',
-    status: typeof input.status === 'string' && (ST as any)[input.status] ? input.status : 'todo',
+    status: validStatus,
     assignee: typeof input.assignee === 'string' ? input.assignee : null,
     priority: typeof input.priority === 'string' && (PR as any)[input.priority] ? input.priority : 'none',
     due: typeof input.due === 'string' ? input.due : null,
@@ -1058,6 +1064,13 @@ export function deleteFileRecord(data: any, fileId: string) {
 }
 
 /* ---------- Auth & Security Validation ---------- */
+export const SNAPSEC_EMAIL_DOMAIN = '@snapsec.co';
+
+export function isSnapsecCompanyEmail(email: string): boolean {
+  const clean = String(email || '').trim().toLowerCase();
+  return EMAIL_REGEX.test(clean) && clean.endsWith(SNAPSEC_EMAIL_DOMAIN);
+}
+
 export function validateAuthCredentials(mode: 'login' | 'signup' | 'reset' | 'password', payload: Record<string, any>) {
   const errors: Record<string, string> = {};
   if (mode === 'login') {
@@ -1072,6 +1085,9 @@ export function validateAuthCredentials(mode: 'login' | 'signup' | 'reset' | 'pa
     const pw = String(payload.password ?? payload.pw ?? '');
     if (!name) errors.name = 'Enter your name';
     if (!EMAIL_REGEX.test(email)) errors.email = 'Enter a valid work email';
+    else if (!isSnapsecCompanyEmail(email)) {
+      errors.email = 'Only @snapsec.co company email addresses are allowed to sign up';
+    }
     if (pw.length < 10 || !/[0-9\W]/.test(pw)) {
       errors.pw = 'Use at least 10 characters, including a number or symbol';
     }

@@ -1,6 +1,6 @@
 /* ---------- store ---------- */
 import { TODAY, diffD, iso, parse, uid } from './utils.js';
-import { PCOLORS, TEAMS_SEED } from './constants.js';
+import { DEFAULT_STATUSES, PCOLORS, STATUSES, TEAMS_SEED, syncStatuses } from './constants.js';
 import { isAuthenticated } from './auth.js';
 import { api } from './api.js';
 
@@ -29,6 +29,7 @@ export function emptyWorkspaceData() {
     plan: 'Business',
     me: 'm1',
     tfa: false,
+    statuses: DEFAULT_STATUSES.map(s => ({ ...s })),
     teams: TEAMS_SEED.map(t => ({ ...t })),
     members: [],
     projects: [],
@@ -113,9 +114,17 @@ export const S = {
   },
 };
 
+if (!Array.isArray(S.data.statuses) || !S.data.statuses.length) {
+  S.data.statuses = DEFAULT_STATUSES.map(s => ({ ...s }));
+}
+syncStatuses(S.data.statuses);
+
 export let _saveT;
 export function save(syncPrefsOnly = false) {
   _localMutCount++;
+  if (Array.isArray(S.data?.statuses) && S.data.statuses.length) {
+    syncStatuses(S.data.statuses);
+  }
   if (!isAuthenticated()) return;
   const payload = { data: S.data, prefs: S.prefs, views: S.views, collapsed: S.ui.collapsed };
   try {
@@ -137,6 +146,10 @@ export async function hydrateFromBackend(onHydrated) {
     const remote = await api.bootstrap();
     if (remote && remote.data && Array.isArray(remote.data.tasks)) {
       S.data = remote.data;
+      if (!Array.isArray(S.data.statuses) || !S.data.statuses.length) {
+        S.data.statuses = DEFAULT_STATUSES.map(s => ({ ...s }));
+      }
+      syncStatuses(S.data.statuses);
       S.prefs = Object.assign({}, DEFAULT_PREFS, remote.prefs || {});
       S.views = remote.views || {};
       S.ui.collapsed = !!remote.collapsed;

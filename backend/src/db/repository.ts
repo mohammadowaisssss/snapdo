@@ -1,7 +1,7 @@
 import { and, asc, desc, eq, inArray, sql } from 'drizzle-orm';
 import fs from 'node:fs';
 import path from 'node:path';
-import { PCOLORS, PR, PSTAT, ST, TEAMS_SEED } from '../utils/constants.js';
+import { DEFAULT_STATUSES, PCOLORS, PR, PSTAT, ST, TEAMS_SEED, syncStatuses } from '../utils/constants.js';
 import {
   isSafeEmoji,
   safeCssColor,
@@ -21,6 +21,7 @@ import {
   RECUR_DAYS,
   createDefaultState,
   detectFileType,
+  isSnapsecCompanyEmail,
   makeProjectKey,
 } from '../services/engine.ts';
 import {
@@ -175,6 +176,7 @@ export function createCleanProductionState(): PersistedStore {
       plan: 'Business',
       me: 'm_shoaib',
       tfa: false,
+      statuses: DEFAULT_STATUSES.map((s: any) => ({ ...s })),
       teams: TEAMS_SEED.map((t: any) => ({ ...t })),
       members: [
         {
@@ -307,7 +309,12 @@ export function populateAllTablesTransaction(store: PersistedStore): number {
     conn.prepare(`DELETE FROM workspaces`).run();
 
     const ws = d.ws || { name: 'Snapsec', url: 'snapsec', c: '#2F2E2A', brand: true };
-    const prefs = { ...DEFAULT_PREFS, ...(store.prefs || {}) };
+    const statuses =
+      Array.isArray(d.statuses) && d.statuses.length > 0
+        ? d.statuses
+        : DEFAULT_STATUSES.map((s: any) => ({ ...s }));
+    syncStatuses(statuses);
+    const prefs: Record<string, any> = { ...DEFAULT_PREFS, ...(store.prefs || {}), statuses };
     if (prefs.name === 'Tanjim Islam') prefs.name = 'Mohammad Owais';
 
     sqliteDb
@@ -912,6 +919,12 @@ export function queryBootstrapStore(): PersistedStore {
       : projects.map(p => p.id);
 
   const smtpConfig = safeJsonParse<any>(wsRow.smtpConfigJson, null);
+  const parsedPrefs = safeJsonParse<Record<string, any>>(wsRow.prefsJson, {});
+  const statuses =
+    Array.isArray(parsedPrefs.statuses) && parsedPrefs.statuses.length > 0
+      ? parsedPrefs.statuses
+      : DEFAULT_STATUSES.map((s: any) => ({ ...s }));
+  syncStatuses(statuses);
 
   return {
     data: {
@@ -927,6 +940,7 @@ export function queryBootstrapStore(): PersistedStore {
       plan: wsRow.plan,
       me: wsRow.meMemberId,
       tfa: Boolean(wsRow.tfa),
+      statuses,
       teams: teamRows.map(tm => ({
         id: tm.id,
         name: tm.name,
@@ -1138,6 +1152,10 @@ export function insertTaskSql(rawInput: Record<string, any>) {
       startVal = dueVal;
     }
 
+    const rawStatus = typeof input.status === 'string' ? input.status.trim() : '';
+    const validStatus =
+      rawStatus && ((ST as any)[rawStatus] || /^[a-z0-9_-]{1,50}$/i.test(rawStatus)) ? rawStatus : 'todo';
+
     sqliteDb
       .insert(sqliteTasks)
       .values({
@@ -1145,7 +1163,7 @@ export function insertTaskSql(rawInput: Record<string, any>) {
         key: taskKey,
         projectId: projRow.id,
         title: safeString(input.title, 500, 'Untitled') || 'Untitled',
-        status: typeof input.status === 'string' && (ST as any)[input.status] ? input.status : 'todo',
+        status: validStatus,
         assigneeId: typeof input.assignee === 'string' && input.assignee ? input.assignee : null,
         priority: typeof input.priority === 'string' && (PR as any)[input.priority] ? input.priority : 'none',
         due: dueVal,
@@ -3068,6 +3086,33 @@ export function patchWorkspaceSql(rawInput: Record<string, any>) {
   const matching = workspacesList.find((w: any) => w.name === oldName);
   if (matching && newName) matching.name = newName;
 
+  const currentPrefs = safeJsonParse<Record<string, any>>(wsRow.prefsJson, {});
+  let updatedStatuses = Array.isArray(currentPrefs.statuses) && currentPrefs.statuses.length > 0
+    ? currentPrefs.statuses
+    : DEFAULT_STATUSES.map((s: any) => ({ ...s }));
+
+  if (Array.isArray(input.statuses) && input.statuses.length > 0) {
+    const sanitized = input.statuses
+      .map((s: any) => {
+        if (!s || typeof s !== 'object') return null;
+        const name = safeString(s.name, 60).trim();
+        const rawId = safeString(s.id, 50)
+          .trim()
+          .toLowerCase()
+          .replace(/[^a-z0-9_-]+/g, '_');
+        if (!name || !rawId) return null;
+        const c = safeCssColor(s.c, '#6366F1');
+        const kind = ['backlog', 'todo', 'progress', 'review', 'done'].includes(s.kind) ? s.kind : 'progress';
+        return { id: rawId, name, c, kind };
+      })
+      .filter(Boolean);
+    if (sanitized.length > 0) {
+      updatedStatuses = sanitized;
+      currentPrefs.statuses = updatedStatuses;
+      syncStatuses(updatedStatuses);
+    }
+  }
+
   const now = Date.now();
   sqliteDb
     .update(sqliteWorkspaces)
@@ -3077,6 +3122,7 @@ export function patchWorkspaceSql(rawInput: Record<string, any>) {
       color: newColor,
       plan: newPlan,
       workspacesListJson: JSON.stringify(workspacesList),
+      prefsJson: JSON.stringify(currentPrefs),
       updatedAt: now,
     })
     .where(eq(sqliteWorkspaces.id, 'ws_main'))
@@ -3085,6 +3131,7 @@ export function patchWorkspaceSql(rawInput: Record<string, any>) {
   return {
     ws: { name: newName, url: newUrl, c: newColor, brand: Boolean(wsRow.brand) },
     workspaces: workspacesList,
+    statuses: updatedStatuses,
     updatedAt: now,
   };
 }
@@ -3412,6 +3459,14 @@ export function signupUserSql(input: {
   const conn = getSqliteConnection();
   const email = String(input.email || '').trim().toLowerCase();
   const name = safeString(input.name, 120).trim();
+  if (!isSnapsecCompanyEmail(email)) {
+    return {
+      ok: false as const,
+      status: 403,
+      error: 'Only @snapsec.co company email addresses are allowed to sign up',
+      errors: { email: 'Only @snapsec.co company email addresses are allowed to sign up' },
+    };
+  }
   const pwHash = hashPassword(input.password);
   const now = Date.now();
 

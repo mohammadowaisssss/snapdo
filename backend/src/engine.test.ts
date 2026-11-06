@@ -237,12 +237,29 @@ test('teams, member invitations, and file management work properly', () => {
   assert.equal(deleteFileRecord(data, f.id), true);
 });
 
-test('auth credentials validation enforces email and password policies', () => {
+test('auth credentials validation enforces @snapsec.co signup domain and password policies', () => {
   assert.equal(validateAuthCredentials('login', { email: 'bad', password: '' }).valid, false);
-  assert.equal(validateAuthCredentials('login', { email: 'user@snapsec.com', password: 'secret' }).valid, true);
+  assert.equal(validateAuthCredentials('login', { email: 'user@snapsec.co', password: 'secret' }).valid, true);
 
-  assert.equal(validateAuthCredentials('signup', { name: 'Owais', email: 'owais@snapsec.com', password: 'short' }).valid, false);
-  assert.equal(validateAuthCredentials('signup', { name: 'Owais', email: 'owais@snapsec.com', password: 'Snapsec!2026' }).valid, true);
+  // Non-snapsec.co emails must be rejected on signup
+  const nonCompanySignup = validateAuthCredentials('signup', {
+    name: 'External User',
+    email: 'external@gmail.com',
+    password: 'Snapsec!2026',
+  });
+  assert.equal(nonCompanySignup.valid, false);
+  assert.ok(nonCompanySignup.errors.email?.includes('@snapsec.co'));
+
+  const wrongTldSignup = validateAuthCredentials('signup', {
+    name: 'Owais',
+    email: 'owais@snapsec.com',
+    password: 'Snapsec!2026',
+  });
+  assert.equal(wrongTldSignup.valid, false);
+  assert.ok(wrongTldSignup.errors.email?.includes('@snapsec.co'));
+
+  assert.equal(validateAuthCredentials('signup', { name: 'Owais', email: 'owais@snapsec.co', password: 'short' }).valid, false);
+  assert.equal(validateAuthCredentials('signup', { name: 'Owais', email: 'owais@snapsec.co', password: 'Snapsec!2026' }).valid, true);
 
   assert.equal(validateAuthCredentials('reset', { password: 'Snapsec!2026', confirmPassword: 'mismatch' }).valid, false);
   assert.equal(validateAuthCredentials('reset', { password: 'Snapsec!2026', confirmPassword: 'Snapsec!2026' }).valid, true);
@@ -1122,8 +1139,17 @@ test('SMTP configuration resolution and mailer utilization for verification & pa
     process.env = originalEnv;
   }
 
-  // 2. Test signup creates verification token, verification URL, and outbox record
-  const uniqueEmail = `qa-verify-${Date.now()}@snapsec-test.co`;
+  // 2. Test signup rejects non-@snapsec.co emails and accepts @snapsec.co emails
+  const rejectedSignup = signupUserSql({
+    name: 'External User',
+    email: `external-${Date.now()}@gmail.com`,
+    password: 'ValidPassword123!',
+    baseUrl: 'https://todo.snapsec.co',
+  });
+  assert.equal(rejectedSignup.ok, false);
+  assert.ok(rejectedSignup.error?.includes('@snapsec.co'));
+
+  const uniqueEmail = `qa-verify-${Date.now()}@snapsec.co`;
   const signupResult = signupUserSql({
     name: 'Verification QA User',
     email: uniqueEmail,
@@ -1179,7 +1205,21 @@ test('SMTP configuration resolution and mailer utilization for verification & pa
   const base = `http://127.0.0.1:${server.address().port}`;
 
   try {
-    const apiTestEmail = `api-verify-${Date.now()}@snapsec-test.co`;
+    // Reject non-@snapsec.co email at API level
+    const badDomainReq = await fetch(`${base}/api/auth/signup`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        name: 'External User',
+        email: `external-${Date.now()}@othercompany.com`,
+        password: 'SecurePassword123!',
+      }),
+    });
+    assert.equal(badDomainReq.status, 400);
+    const badDomainData = await badDomainReq.json();
+    assert.ok(badDomainData.errors?.email?.includes('@snapsec.co'));
+
+    const apiTestEmail = `api-verify-${Date.now()}@snapsec.co`;
 
     // A. POST /api/auth/signup
     const signupReq = await fetch(`${base}/api/auth/signup`, {
@@ -1282,9 +1322,63 @@ test('SMTP configuration resolution and mailer utilization for verification & pa
       authJsSource.includes('data-a="doVerifyOtp"'),
       'auth.js must contain the OTP verification submit button',
     );
+
+    // I. Custom Workspace Statuses CRUD & Persistence + Inline Task Description Screenshot Images
+    const customStatuses = [
+      { id: 'backlog', name: 'Backlog', c: '#9CA3AF', kind: 'backlog' },
+      { id: 'todo', name: 'To Do', c: '#6B7280', kind: 'todo' },
+      { id: 'progress', name: 'In Progress', c: '#F59E0B', kind: 'progress' },
+      { id: 'qa_testing', name: 'QA Testing', c: '#8B5CF6', kind: 'review' },
+      { id: 'done', name: 'Shipped', c: '#10B981', kind: 'done' },
+    ];
+    const wsPatchRes = await fetch(`${base}/api/workspace`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ statuses: customStatuses }),
+    }).then(r => r.json());
+    assert.equal(wsPatchRes.ok, true);
+    assert.equal(wsPatchRes.statuses.length, 5);
+    assert.equal(wsPatchRes.statuses[3].id, 'qa_testing');
+    assert.equal(wsPatchRes.statuses[3].name, 'QA Testing');
+    assert.equal(wsPatchRes.statuses[4].name, 'Shipped');
+
+    const samplePngDataUrl =
+      'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
+    const inlineDesc = `Steps to reproduce:\n\n![bug-screenshot.png](${samplePngDataUrl})\n\nVerified on staging.`;
+
+    const customTaskRes = await fetch(`${base}/api/tasks`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        title: 'Verify custom status & inline screenshot in description',
+        project: 'p1',
+        status: 'qa_testing',
+        desc: inlineDesc,
+      }),
+    }).then(r => r.json());
+    assert.equal(customTaskRes.ok, true);
+    assert.equal(customTaskRes.task.status, 'qa_testing');
+    assert.ok(customTaskRes.task.desc.includes(`![bug-screenshot.png](${samplePngDataUrl})`));
+
+    // Verify renderMarkdown renders the inline base64 screenshot as an <img> inside the description
+    const renderedDescHtml = renderMarkdown(customTaskRes.task.desc);
+    assert.ok(
+      renderedDescHtml.includes(`<img class="md-img" src="${samplePngDataUrl}" alt="bug-screenshot.png" loading="lazy">`),
+      'Inline base64 screenshot in task description must render as <img class="md-img">',
+    );
+
+    // Verify bootstrap returns the persisted custom statuses
+    const bootRes = await fetch(`${base}/api/bootstrap`).then(r => r.json());
+    assert.ok(Array.isArray(bootRes.data.statuses));
+    assert.ok(bootRes.data.statuses.some((s: any) => s.id === 'qa_testing' && s.name === 'QA Testing'));
+
+    // Cleanup test task and restore default statuses
+    await fetch(`${base}/api/tasks/${customTaskRes.task.id}`, { method: 'DELETE' });
+    await fetch(`${base}/api/reset`, { method: 'POST' });
   } finally {
     server.close();
   }
 });
+
 
 

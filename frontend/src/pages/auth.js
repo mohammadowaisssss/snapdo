@@ -74,10 +74,10 @@ export function renderAuth() {
   if (s === 'signup')
     return authShell(
       `<form class="auth-card${S.ui.fx.auth ? ' fx-auth' : ''}" data-submit="doSignup" novalidate>
-    <div style="display:flex;justify-content:center">${LOGO(30)}</div><h1>Create your account</h1><p class="sub">Set up your account to manage projects and tasks with your team.</p>
+    <div style="display:flex;justify-content:center">${LOGO(30)}</div><h1>Create your account</h1><p class="sub">Sign up with your <b>@snapsec.co</b> company email to manage projects and tasks with your team.</p>
     ${e.signup ? `<div class="alert danger" role="alert">${ic('circle-alert', 15)}<span>${esc(e.signup)}</span></div>` : ''}
     <div class="field"><label class="label" for="s-name">Full name</label><input class="input input-lg ${icls('name')}" id="s-name" value="${esc(f.name)}" autocomplete="name" placeholder="Your full name">${ferr('name')}</div>
-    <div class="field"><label class="label" for="s-email">Work email</label><input class="input input-lg ${icls('email')}" id="s-email" type="email" value="${esc(f.email)}" autocomplete="email" placeholder="you@company.com">${ferr('email')}</div>
+    <div class="field"><label class="label" for="s-email">Snapsec work email</label><input class="input input-lg ${icls('email')}" id="s-email" type="email" value="${esc(f.email)}" autocomplete="email" placeholder="you@snapsec.co">${ferr('email') || '<span class="hint">Only @snapsec.co company emails are eligible for signup.</span>'}</div>
     <div class="field"><label class="label" for="s-pw">Password</label><input class="input input-lg ${icls('pw')}" id="s-pw" type="password" data-in="pwStrength" value="${esc(S.ui.pwNew || '')}" autocomplete="new-password" placeholder="At least 10 characters">${strengthMeter(S.ui.pwNew || '')}${ferr('pw') || '<span class="hint">At least 10 characters with a number or symbol.</span>'}</div>
     <button class="btn btn-primary btn-lg btn-block" data-a="doSignup" id="signup-btn">Create account</button>
     <p class="hint" style="text-align:center">By creating an account you agree to the Terms and Privacy Policy.</p>

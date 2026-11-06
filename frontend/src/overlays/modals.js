@@ -74,15 +74,21 @@ export function taskModal(m, H) {
   return `${H(m.edit ? 'Edit task' : 'New task', m.edit ? `<span class="mono">${esc(task(m.edit)?.key || '')}</span>` : '')}
   <form class="modal-b" data-submit="submitTask" style="gap:12px">
     <div class="field"><label class="sr" for="f-title">Task name</label><input class="input input-lg ${err ? 'is-error' : ''}" id="f-title" data-in="form" data-f="title" value="${esc(f.title)}" placeholder="Task name" autofocus aria-invalid="${!!err}" aria-describedby="f-title-err" style="font-size:15px;font-weight:500">${err ? `<span class="err" id="f-title-err">${ic('circle-alert', 12)}${esc(err)}</span>` : ''}</div>
-    <div class="field">
+    <div class="field" data-desc-box="__form">
       <div class="row" style="justify-content:space-between;margin-bottom:4px">
-        <label class="label" for="f-desc" style="margin:0">Description <span class="faint" style="font-weight:400">(Markdown supported)</span></label>
+        <label class="label" for="f-desc" style="margin:0">Description <span class="faint" style="font-weight:400">(Markdown &amp; inline screenshots ${MOD}+V)</span></label>
         ${mdToolbar('f-desc', 'form:desc')}
       </div>
       ${
         descPrev
           ? `<div class="md-preview-box md-body" style="min-height:76px">${f.desc?.trim() ? md(f.desc) : '<span class="faint">Nothing to preview yet…</span>'}</div>`
-          : `<textarea class="textarea" id="f-desc" data-in="form" data-f="desc" placeholder="Add a description with **Markdown**, lists, code, or tables… (optional)" rows="3">${esc(f.desc)}</textarea>`
+          : `<textarea class="textarea" id="f-desc" data-in="form" data-f="desc" placeholder="Add a description with **Markdown**, lists, code, tables, or paste screenshots (${MOD}+V) inline…" rows="4">${esc(f.desc)}</textarea>${
+              /!\[[^\]]*\]\((data:image\/[^)]+)\)/.test(f.desc || '')
+                ? `<div class="desc-inline-imgs" style="margin-top:6px;padding:8px 10px;border-radius:6px;border:1px dashed var(--border);background:var(--surface-2)"><div class="faint" style="font-size:11px;margin-bottom:4px">Inline images in description:</div><div class="md-body">${md(
+                    (f.desc || '').match(/!\[[^\]]*\]\((data:image\/[^)]+)\)/g)?.join('\n\n') || '',
+                  )}</div></div>`
+                : ''
+            }`
       }
     </div>
     <div class="row" style="flex-wrap:wrap;gap:6px">
@@ -99,8 +105,8 @@ export function taskModal(m, H) {
       ${f.subtasks.map((s, i) => `<div class="subt" style="padding:0 4px">${ic('circle', 13)}<span class="s">${esc(s.title)}</span><button type="button" class="ibtn ibtn-xs x" style="opacity:1" data-a="formRmSub" data-i="${i}" aria-label="Remove">${ic('x', 12)}</button></div>`).join('')}
       <div class="inwrap">${ic('plus', 14)}<input class="input" id="f-sub" data-key-enter="formAddSub" placeholder="Add a subtask and press Enter"></div></div>
     <div class="field"><span class="label">Attachments</span>
-      ${f.files.length ? `<div class="col" style="gap:4px">${f.files.map((x, i) => `<div class="upl" style="padding:6px 10px"><span class="ftype" style="--c:${FT[x.type]?.c || '#6B7280'};width:22px;height:22px">${ic(FT[x.type]?.i || 'file', 12)}</span><span class="grow trunc">${esc(x.name)}</span><span class="faint" style="font-size:11.5px">${esc(x.size)}</span><button type="button" class="ibtn ibtn-xs" data-a="formRmFile" data-i="${i}" aria-label="Remove">${ic('x', 12)}</button></div>`).join('')}</div>` : ''}
-      <label class="dropzone" style="padding:10px">${ic('paperclip', 14)}<span>Attach files or paste with ${MOD}+V</span><input type="file" multiple hidden data-in="formFiles"></label></div>
+      ${f.files.length ? `<div class="col" style="gap:4px">${f.files.map((x, i) => `<div class="upl" style="padding:6px 10px"><span class="ftype" style="--c:${FT[x.type]?.c || '#6B7280'};width:22px;height:22px">${ic(FT[x.type]?.i || 'file', 12)}</span><span class="grow trunc">${esc(x.name)}</span><span class="faint" style="font-size:11.5px">${esc(x.size)}</span>${x.type === 'img' && x.dataUrl ? `<button type="button" class="btn btn-xs btn-ghost" data-a="insertFormFileInline" data-i="${i}" title="Insert image inline in description">${ic('image', 11)}Inline</button>` : ''}<button type="button" class="ibtn ibtn-xs" data-a="formRmFile" data-i="${i}" aria-label="Remove">${ic('x', 12)}</button></div>`).join('')}</div>` : ''}
+      <label class="dropzone" style="padding:10px">${ic('paperclip', 14)}<span>Attach files or paste screenshots inline with ${MOD}+V</span><input type="file" multiple hidden data-in="formFiles"></label></div>
   </form>
   <div class="modal-f">${m.edit ? '' : `<label class="row" style="gap:8px;font-size:12.5px;color:var(--text-2);cursor:pointer"><input type="checkbox" class="toggle" id="f-more" data-in="formMore" ${f.more ? 'checked' : ''}>Create more</label>`}<span class="sp"></span>
     <span class="faint hide-m" style="font-size:11.5px"><kbd>${MOD}</kbd> <kbd>↵</kbd></span>

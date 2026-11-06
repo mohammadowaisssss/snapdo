@@ -3,17 +3,118 @@
    ===================================================================== */
 import { dOff, esc, fmtDate } from '../core/utils.js';
 import { ic, wsLogo } from '../core/icons.js';
-import { D, S, me } from '../core/store.js';
-import { av, pIcon } from '../ui/helpers.js';
+import { STATUSES } from '../core/constants.js';
+import { D, S, allTasks, me } from '../core/store.js';
+import { av, pIcon, stIcon } from '../ui/helpers.js';
 import { permsTable, teamsGrid } from './members.js';
 import { page404 } from './errors.js';
 import { SHORTCUTS } from '../overlays/modals.js';
+
+export const STATUS_COLORS = [
+  '#8A867E',
+  '#6B7280',
+  '#3B82C4',
+  '#5A67D8',
+  '#8662C9',
+  '#23918A',
+  '#C48A1E',
+  '#C54B78',
+  '#3D8E5F',
+  '#C4473A',
+];
+
+export const STATUS_KINDS = [
+  ['backlog', 'Backlog (Dashed)'],
+  ['todo', 'To Do (Open)'],
+  ['progress', 'In Progress (Half)'],
+  ['review', 'Review (Three-quarter)'],
+  ['done', 'Done (Checkmark)'],
+];
+
+export function renderStatusesSection() {
+  const sts = STATUSES;
+  const newColor = S.ui.newStatusColor || '#5A67D8';
+  const newKind = S.ui.newStatusKind || 'progress';
+  const editId = S.ui.editStatusId || null;
+  const err = S.ui.errors?.status || '';
+
+  return `<div class="sblock" id="workspace-statuses-section">
+    <div class="row" style="justify-content:space-between;align-items:flex-start;margin-bottom:12px;flex-wrap:wrap;gap:8px">
+      <div>
+        <h2 style="margin:0">Task statuses</h2>
+        <div class="muted" style="font-size:13px;margin-top:2px">Create, rename, customize colors, reorder, or delete workflow statuses across boards and task lists.</div>
+      </div>
+      <button type="button" class="btn btn-ghost btn-sm" data-a="resetDefaultStatuses">${ic('rotate-ccw', 13)}Restore defaults</button>
+    </div>
+    ${err ? `<div class="alert danger" role="alert" style="margin-bottom:12px">${ic('circle-alert', 15)}<span>${esc(err)}</span></div>` : ''}
+    <div class="panel" style="overflow:hidden;margin-bottom:14px" data-testid="statuses-list">
+      ${sts
+        .map((s, idx) => {
+          const count = allTasks().filter(t => t.status === s.id).length;
+          const isEditing = editId === s.id;
+          const editColor = S.ui.editStatusColor || s.c || '#6B7280';
+          const editKind = S.ui.editStatusKind || s.kind || 'todo';
+          if (isEditing) {
+            return `<div class="srow" style="padding:12px 14px;background:var(--surface-2);gap:12px;flex-wrap:wrap" data-status-row="${esc(s.id)}">
+              <div class="col grow" style="gap:10px;min-width:240px">
+                <div class="row" style="gap:8px;flex-wrap:wrap">
+                  <input class="input" id="edit-st-name" value="${esc(S.ui.editStatusName ?? s.name)}" placeholder="Status name" style="max-width:220px" aria-label="Edit status name">
+                  <select class="select" id="edit-st-kind" data-in="editStatusKind" style="width:auto;min-width:170px" aria-label="Status icon style">
+                    ${STATUS_KINDS.map(([k, label]) => `<option value="${k}" ${editKind === k ? 'selected' : ''}>${label}</option>`).join('')}
+                  </select>
+                </div>
+                <div class="row" style="gap:8px;align-items:center">
+                  <span class="faint" style="font-size:12px">Color:</span>
+                  <div class="swatches">
+                    ${STATUS_COLORS.map(c => `<button type="button" class="sw ${editColor === c ? 'on' : ''}" style="--c:${c};width:20px;height:20px" data-a="pickEditStatusColor" data-v="${c}" aria-label="Status color ${c}"></button>`).join('')}
+                  </div>
+                </div>
+              </div>
+              <div class="row" style="gap:6px">
+                <button type="button" class="btn btn-primary btn-sm" data-a="saveEditStatus" data-id="${esc(s.id)}">Save</button>
+                <button type="button" class="btn btn-ghost btn-sm" data-a="cancelEditStatus">Cancel</button>
+              </div>
+            </div>`;
+          }
+          return `<div class="srow" style="padding:10px 14px;gap:12px" data-status-row="${esc(s.id)}">
+            <div class="row grow" style="gap:10px;min-width:0">
+              ${stIcon(s.id, 15)}
+              <span style="font-weight:500" class="trunc">${esc(s.name)}</span>
+              <span class="mono faint" style="font-size:11.5px;background:var(--surface-2);padding:1px 6px;border-radius:4px">${esc(s.id)}</span>
+              <span class="badge" style="margin-left:4px">${count} task${count === 1 ? '' : 's'}</span>
+            </div>
+            <div class="row" style="gap:4px">
+              <button type="button" class="ibtn ibtn-xs" data-a="moveStatus" data-id="${esc(s.id)}" data-dir="-1" ${idx === 0 ? 'disabled' : ''} data-tip="Move left/up" aria-label="Move ${esc(s.name)} up">${ic('arrow-up', 13)}</button>
+              <button type="button" class="ibtn ibtn-xs" data-a="moveStatus" data-id="${esc(s.id)}" data-dir="1" ${idx === sts.length - 1 ? 'disabled' : ''} data-tip="Move right/down" aria-label="Move ${esc(s.name)} down">${ic('arrow-down', 13)}</button>
+              <button type="button" class="btn btn-ghost btn-sm" data-a="startEditStatus" data-id="${esc(s.id)}" aria-label="Edit ${esc(s.name)}">${ic('pencil', 13)}Edit</button>
+              <button type="button" class="btn btn-danger-ghost btn-sm" data-a="deleteStatus" data-id="${esc(s.id)}" ${sts.length <= 1 ? 'disabled' : ''} aria-label="Delete ${esc(s.name)}">${ic('trash-2', 13)}Delete</button>
+            </div>
+          </div>`;
+        })
+        .join('')}
+    </div>
+    <form class="panel" style="padding:14px" data-submit="addStatus" novalidate>
+      <div class="label" style="margin-bottom:8px">Create new status</div>
+      <div class="row" style="gap:10px;flex-wrap:wrap;align-items:center">
+        <input class="input" id="new-st-name" value="${esc(S.ui.newStatusName || '')}" data-in="newStatusName" placeholder="Status name (e.g. QA Testing, Blocked)" style="max-width:240px" aria-label="New status name">
+        <select class="select" id="new-st-kind" data-in="newStatusKind" style="width:auto;min-width:170px" aria-label="New status stage type">
+          ${STATUS_KINDS.map(([k, label]) => `<option value="${k}" ${newKind === k ? 'selected' : ''}>${label}</option>`).join('')}
+        </select>
+        <div class="swatches" role="radiogroup" aria-label="New status color">
+          ${STATUS_COLORS.map(c => `<button type="button" class="sw ${newColor === c ? 'on' : ''}" style="--c:${c};width:20px;height:20px" data-a="pickNewStatusColor" data-v="${c}" aria-label="Color ${c}"></button>`).join('')}
+        </div>
+        <button type="submit" class="btn btn-primary btn-sm" data-a="addStatus" id="add-status-btn">${ic('plus', 14)}Add status</button>
+      </div>
+    </form>
+  </div>`;
+}
 
 export const SET_NAV = [
   [
     'General',
     [
       ['workspace', 'Workspace', 'building-2'],
+      ['statuses', 'Statuses', 'circle-dot'],
       ['appearance', 'Appearance', 'palette'],
       ['language', 'Language', 'languages'],
       ['datetime', 'Date & time', 'clock'],
@@ -90,15 +191,18 @@ export function settingsBody(sec, title) {
   switch (sec) {
     case 'workspace':
       return (
-        H('Your workspace name, address, and identity.') +
+        H('Your workspace name, address, workflow statuses, and identity.') +
         `
       <form data-submit="saveWorkspace">
       <div class="sblock" style="margin-top:0"><div class="row" style="gap:14px;margin-bottom:18px">${wsLogo(d.ws, 52)}<div><div class="label" style="margin-bottom:6px">Workspace icon</div><div class="swatches">${['#2F2E2A', '#5A67D8', '#3B82C4', '#23918A', '#C54B78', '#C48A1E'].map(c => `<button type="button" class="sw ${d.ws.c === c ? 'on' : ''}" style="--c:${c};width:22px;height:22px" data-a="wsColor" data-v="${c}" aria-label="Color ${c}"></button>`).join('')}</div></div></div>
       <div class="col" style="gap:14px;max-width:440px"><div class="field"><label class="label" for="ws-name">Workspace name</label><input class="input" id="ws-name" value="${esc(d.ws.name)}"></div>
       <div class="field"><label class="label" for="ws-url">Workspace URL</label><div class="row" style="gap:0"><span class="input" style="width:auto;background:var(--surface-2);border-right:0;border-radius:6px 0 0 6px;display:flex;align-items:center;color:var(--text-2)">snapsec.com/</span><input class="input" id="ws-url" value="${esc(d.ws.url)}" style="border-radius:0 6px 6px 0"></div><span class="hint">Changing the URL will break existing links.</span></div>
       <div><button class="btn btn-primary" data-a="saveWorkspace" id="ws-save">Save changes</button></div></div></div></form>
+      ${renderStatusesSection()}
       <div class="sblock"><h2 style="color:var(--red)">Danger zone</h2>${srow('Delete workspace', 'Permanently delete this workspace, its projects, tasks, and files. This cannot be undone.', `<button class="btn btn-danger-ghost" style="border:1px solid color-mix(in srgb,var(--red) 35%,transparent)" data-a="delWorkspace">Delete workspace</button>`)}</div>`
       );
+    case 'statuses':
+      return H('Manage task statuses, board columns, colors, and workflow stages for your workspace.') + renderStatusesSection();
     case 'appearance':
       return (
         H('Customize how Snapsec looks on this device.') +

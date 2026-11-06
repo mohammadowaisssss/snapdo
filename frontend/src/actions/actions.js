@@ -2,7 +2,7 @@
    ACTIONS · INPUT HANDLERS · DRAG & DROP · KEYBOARD · INIT
    ===================================================================== */
 import { $, $$, TODAY, addD, dOff, esc, fmtDate, iso, parse, uid } from '../core/utils.js';
-import { PR, PSTAT, ST } from '../core/constants.js';
+import { DEFAULT_STATUSES, PR, PSTAT, ST, STATUSES, syncStatuses } from '../core/constants.js';
 import { ic } from '../core/icons.js';
 import { seed } from '../data/seed.js';
 import { api } from '../core/api.js';
@@ -762,13 +762,155 @@ export function readFileToRecord(file) {
   });
 }
 
+export function appendMarkdownImage(currentText, name, dataUrl, cursorStart = null, cursorEnd = null) {
+  const safeAlt = String(name || 'screenshot').replace(/[[\]]/g, '');
+  const snippet = `![${safeAlt}](${dataUrl})`;
+  const base = String(currentText || '');
+  if (base.includes(snippet)) return base;
+  if (typeof cursorStart === 'number' && cursorStart >= 0 && cursorStart <= base.length) {
+    const before = base.slice(0, cursorStart);
+    const after = base.slice(typeof cursorEnd === 'number' ? cursorEnd : cursorStart);
+    const prefix = before && !before.endsWith('\n') ? '\n' : '';
+    const suffix = after && !after.startsWith('\n') ? '\n' : '';
+    return `${before}${prefix}${snippet}${suffix}${after}`;
+  }
+  return base.trim() ? `${base.replace(/\s+$/, '')}\n\n${snippet}\n` : `${snippet}\n`;
+}
+
+export async function insertFilesInlineInDescription(files, targetId = 'f-desc') {
+  const list = [...(files || [])];
+  if (!list.length) return;
+  const recs = await Promise.all(list.map(readFileToRecord));
+  const ta = typeof document !== 'undefined' ? document.getElementById(targetId) : null;
+  const selStart = ta && typeof ta.selectionStart === 'number' ? ta.selectionStart : null;
+  const selEnd = ta && typeof ta.selectionEnd === 'number' ? ta.selectionEnd : null;
+
+  if (targetId === 'f-desc' || (S.ui.modals?.[S.ui.modals.length - 1]?.type === 'task' && S.ui.form)) {
+    const f = S.ui.form;
+    if (!f) return;
+    if (ta && ta.tagName === 'TEXTAREA') f.desc = ta.value;
+    let inlinedCount = 0;
+    recs.forEach(r => {
+      if (!f.files.some(existing => existing.name === r.name && existing.size === r.size)) {
+        f.files.push(r);
+      }
+      if (r.type === 'img' && r.dataUrl) {
+        f.desc = appendMarkdownImage(f.desc, r.name, r.dataUrl, inlinedCount === 0 ? selStart : null, inlinedCount === 0 ? selEnd : null);
+        inlinedCount++;
+      }
+    });
+    render();
+    toast(
+      inlinedCount > 0
+        ? inlinedCount === 1
+          ? `Inserted ${recs[0].name} inline in description`
+          : `Inserted ${inlinedCount} images inline in description`
+        : recs.length === 1
+          ? `Attached ${recs[0].name} to task`
+          : `Attached ${recs.length} files to task`,
+      { ms: 2000 },
+    );
+    return;
+  }
+
+  if (targetId === 'd-desc' || (S.ui.drawer && task(S.ui.drawer))) {
+    const t = task(S.ui.drawer);
+    if (!t) return;
+    if (ta && ta.tagName === 'TEXTAREA') {
+      t.desc = ta.value;
+    } else {
+      t.desc = normalizeHtmlToMarkdown(t.desc || '');
+    }
+    let inlinedCount = 0;
+    const now = Date.now();
+    t.attachments = t.attachments || [];
+    D().files = D().files || [];
+    recs.forEach(r => {
+      const attRec = {
+        id: r.id || uid('f'),
+        name: r.name,
+        type: r.type,
+        size: r.size,
+        by: D().me,
+        at: now,
+        dataUrl: r.dataUrl || null,
+        textContent: r.textContent || null,
+        mime: r.mime || null,
+      };
+      if (!t.attachments.some(a => a.name === attRec.name && a.size === attRec.size)) {
+        t.attachments.push(attRec);
+      }
+      if (!D().files.some(df => df.id === attRec.id)) {
+        D().files.unshift({ ...attRec, project: t.project, task: t.id });
+      }
+      if (r.type === 'img' && r.dataUrl) {
+        t.desc = appendMarkdownImage(t.desc, r.name, r.dataUrl, inlinedCount === 0 ? selStart : null, inlinedCount === 0 ? selEnd : null);
+        inlinedCount++;
+      }
+    });
+    t.updated = now;
+    save();
+    api.updateTask(t.id, { desc: t.desc, attachments: t.attachments }).catch(() => {});
+    render();
+    toast(
+      inlinedCount > 0
+        ? inlinedCount === 1
+          ? `Inserted ${recs[0].name} inline in task description`
+          : `Inserted ${inlinedCount} images inline in task description`
+        : `Attached ${recs.length} file${recs.length > 1 ? 's' : ''} to task`,
+      { ms: 2000 },
+    );
+    return;
+  }
+
+  if (ta && ta.tagName === 'TEXTAREA') {
+    recs.forEach(r => {
+      if (r.type === 'img' && r.dataUrl) {
+        ta.value = appendMarkdownImage(ta.value, r.name, r.dataUrl, selStart, selEnd);
+      }
+    });
+    syncTextareaState(ta);
+    render();
+  }
+}
+
+IN.mdInlineImage = async el => {
+  const targetId = el.dataset.target || 'f-desc';
+  const list = [...(el.files || [])];
+  el.value = '';
+  if (!list.length) return;
+  await insertFilesInlineInDescription(list, targetId);
+};
+
 IN.formFiles = async el => {
   const list = [...(el.files || [])];
   el.value = '';
   if (!list.length) return;
   const recs = await Promise.all(list.map(readFileToRecord));
-  S.ui.form.files.push(...recs);
+  const ta = $('#f-desc');
+  if (ta) S.ui.form.desc = ta.value;
+  let inlined = 0;
+  recs.forEach(r => {
+    S.ui.form.files.push(r);
+    if (r.type === 'img' && r.dataUrl) {
+      S.ui.form.desc = appendMarkdownImage(S.ui.form.desc, r.name, r.dataUrl);
+      inlined++;
+    }
+  });
   render();
+  if (inlined > 0) {
+    toast(inlined === 1 ? `Attached & inlined ${recs[0].name} in description` : `Attached & inlined ${inlined} images in description`, { ms: 2000 });
+  }
+};
+A.insertFormFileInline = el => {
+  const idx = +el.dataset.i;
+  const file = S.ui.form?.files?.[idx];
+  if (!file || !file.dataUrl) return;
+  const ta = $('#f-desc');
+  if (ta) S.ui.form.desc = ta.value;
+  S.ui.form.desc = appendMarkdownImage(S.ui.form.desc, file.name, file.dataUrl);
+  render();
+  toast(`Inserted ${file.name} inline in description`, { ms: 1800 });
 };
 KEY.formAddSub = el => {
   const v = el.value.trim();
@@ -782,7 +924,12 @@ A.formRmSub = el => {
   render();
 };
 A.formRmFile = el => {
-  S.ui.form.files.splice(+el.dataset.i, 1);
+  const removed = S.ui.form.files.splice(+el.dataset.i, 1)[0];
+  if (removed?.dataUrl && S.ui.form?.desc) {
+    const safeAlt = String(removed.name || 'screenshot').replace(/[[\]]/g, '');
+    const snippet = `![${safeAlt}](${removed.dataUrl})`;
+    S.ui.form.desc = S.ui.form.desc.replace(snippet, '').replace(/\n{3,}/g, '\n\n').trim();
+  }
   render();
 };
 A.submitTask = () => {
@@ -2707,6 +2854,195 @@ A.saveWorkspace = () => {
       toast('Workspace settings saved');
   });
 };
+
+/* ---------- Custom Workspace Statuses Management ---------- */
+function persistWorkspaceStatuses() {
+  syncStatuses(D().statuses);
+  save();
+  api.updateWorkspace({ statuses: D().statuses }).catch(() => {});
+}
+
+IN.newStatusName = el => {
+  S.ui.newStatusName = el.value;
+};
+IN.newStatusKind = el => {
+  S.ui.newStatusKind = el.value;
+};
+A.pickNewStatusColor = el => {
+  const nameIn = $('#new-st-name') || $('#st-new-name');
+  if (nameIn) S.ui.newStatusName = nameIn.value;
+  S.ui.newStatusColor = el.dataset.v || el.dataset.c;
+  render();
+};
+KEY.addStatus = () => A.addStatus();
+A.addStatus = () => {
+  const nameIn = $('#new-st-name') || $('#st-new-name');
+  const kindIn = $('#new-st-kind') || $('#st-new-kind');
+  const rawName = (nameIn ? nameIn.value : S.ui.newStatusName || '').trim();
+  if (!rawName) {
+    toast('Enter a status name', { kind: 'err' });
+    nameIn?.focus();
+    return;
+  }
+  D().statuses = Array.isArray(D().statuses) && D().statuses.length ? D().statuses : DEFAULT_STATUSES.map(s => ({ ...s }));
+  if (D().statuses.some(s => s.name.toLowerCase() === rawName.toLowerCase())) {
+    toast(`Status "${rawName}" already exists`, { kind: 'err' });
+    nameIn?.focus();
+    return;
+  }
+  const baseSlug = rawName
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '')
+    .slice(0, 24) || 'status';
+  let id = baseSlug;
+  let seq = 2;
+  while (D().statuses.some(s => s.id === id)) {
+    id = `${baseSlug}_${seq++}`;
+  }
+  const kind = kindIn ? kindIn.value : S.ui.newStatusKind || 'progress';
+  const c = S.ui.newStatusColor || '#5A67D8';
+  const newSt = { id, name: rawName, c, kind };
+  const doneIdx = D().statuses.findIndex(s => s.id === 'done' || s.kind === 'done');
+  if (kind !== 'done' && doneIdx === D().statuses.length - 1 && doneIdx >= 0) {
+    D().statuses.splice(doneIdx, 0, newSt);
+  } else {
+    D().statuses.push(newSt);
+  }
+  S.ui.newStatusName = '';
+  persistWorkspaceStatuses();
+  render();
+  toast(`Created status "${rawName}"`);
+};
+
+A.startEditStatus = el => {
+  const id = el.dataset.id;
+  const st = (D().statuses || STATUSES).find(s => s.id === id);
+  if (!st) return;
+  S.ui.editStatusId = id;
+  S.ui.editingStatusId = id;
+  S.ui.editStatusName = st.name;
+  S.ui.editStatusColor = st.c || '#5A67D8';
+  S.ui.editStatusKind = st.kind || 'progress';
+  render();
+  setTimeout(() => ($('#edit-st-name') || $(`#st-edit-name-${id}`))?.focus(), 20);
+};
+A.cancelEditStatus = () => {
+  S.ui.editStatusId = null;
+  S.ui.editingStatusId = null;
+  render();
+};
+IN.editStatusKind = el => {
+  S.ui.editStatusKind = el.value;
+};
+A.pickEditStatusColor = el => {
+  const id = S.ui.editStatusId || S.ui.editingStatusId;
+  const nameIn = $('#edit-st-name') || (id ? $(`#st-edit-name-${id}`) : null);
+  if (nameIn) S.ui.editStatusName = nameIn.value;
+  S.ui.editStatusColor = el.dataset.v || el.dataset.c;
+  render();
+};
+KEY.saveEditStatus = el => A.saveEditStatus(el);
+A.saveEditStatus = el => {
+  const id = el?.dataset?.id || S.ui.editStatusId || S.ui.editingStatusId;
+  if (!id) return;
+  D().statuses = Array.isArray(D().statuses) && D().statuses.length ? D().statuses : DEFAULT_STATUSES.map(s => ({ ...s }));
+  const st = D().statuses.find(s => s.id === id);
+  if (!st) return;
+  const nameIn = $('#edit-st-name') || $(`#st-edit-name-${id}`);
+  const kindIn = $('#edit-st-kind') || $(`#st-edit-kind-${id}`);
+  const newName = (nameIn ? nameIn.value : S.ui.editStatusName || st.name).trim();
+  if (!newName) {
+    toast("Status name can't be empty", { kind: 'err' });
+    nameIn?.focus();
+    return;
+  }
+  if (D().statuses.some(s => s.id !== id && s.name.toLowerCase() === newName.toLowerCase())) {
+    toast(`Another status is already named "${newName}"`, { kind: 'err' });
+    nameIn?.focus();
+    return;
+  }
+  st.name = newName;
+  st.c = S.ui.editStatusColor || st.c || '#5A67D8';
+  st.kind = kindIn ? kindIn.value : S.ui.editStatusKind || st.kind || 'progress';
+  S.ui.editStatusId = null;
+  S.ui.editingStatusId = null;
+  persistWorkspaceStatuses();
+  render();
+  toast(`Updated status "${newName}"`);
+};
+
+A.moveStatus = el => {
+  const id = el.dataset.id;
+  const dir = +el.dataset.dir || 0;
+  D().statuses = Array.isArray(D().statuses) && D().statuses.length ? D().statuses : DEFAULT_STATUSES.map(s => ({ ...s }));
+  const idx = D().statuses.findIndex(s => s.id === id);
+  const targetIdx = idx + dir;
+  if (idx < 0 || targetIdx < 0 || targetIdx >= D().statuses.length) return;
+  const [item] = D().statuses.splice(idx, 1);
+  D().statuses.splice(targetIdx, 0, item);
+  persistWorkspaceStatuses();
+  render();
+};
+
+A.deleteStatus = el => {
+  const id = el.dataset.id;
+  D().statuses = Array.isArray(D().statuses) && D().statuses.length ? D().statuses : DEFAULT_STATUSES.map(s => ({ ...s }));
+  if (D().statuses.length <= 1) {
+    toast('Workspace must have at least one status', { kind: 'err' });
+    return;
+  }
+  const st = D().statuses.find(s => s.id === id);
+  if (!st) return;
+  const fallback = D().statuses.find(s => s.id !== id) || DEFAULT_STATUSES[0];
+  const affected = (D().tasks || []).filter(t => t.status === id);
+  const doDelete = () => {
+    D().statuses = D().statuses.filter(s => s.id !== id);
+    affected.forEach(t => {
+      t.status = fallback.id;
+      api.updateTask(t.id, { status: fallback.id }).catch(() => {});
+    });
+    if (S.ui.editStatusId === id || S.ui.editingStatusId === id) {
+      S.ui.editStatusId = null;
+      S.ui.editingStatusId = null;
+    }
+    persistWorkspaceStatuses();
+    render();
+    toast(
+      affected.length
+        ? `Deleted "${st.name}" and moved ${affected.length} task${affected.length === 1 ? '' : 's'} to "${fallback.name}"`
+        : `Deleted status "${st.name}"`,
+    );
+  };
+  if (affected.length > 0) {
+    confirmDlg({
+      title: `Delete status "${st.name}"?`,
+      body: `<b>${affected.length} task${affected.length === 1 ? '' : 's'}</b> currently in <b>${esc(st.name)}</b> will be moved to <b>${esc(fallback.name)}</b>.`,
+      ok: 'Delete status',
+      danger: true,
+      run: doDelete,
+    });
+  } else {
+    doDelete();
+  }
+};
+
+A.resetDefaultStatuses = () => {
+  D().statuses = DEFAULT_STATUSES.map(s => ({ ...s }));
+  const validIds = new Set(D().statuses.map(s => s.id));
+  (D().tasks || []).forEach(t => {
+    if (!validIds.has(t.status)) {
+      t.status = 'todo';
+      api.updateTask(t.id, { status: 'todo' }).catch(() => {});
+    }
+  });
+  S.ui.editStatusId = null;
+  S.ui.editingStatusId = null;
+  persistWorkspaceStatuses();
+  render();
+  toast('Default statuses restored');
+};
+
 A.delWorkspace = () =>
   confirmDlg({
     title: `Delete ${D().ws.name}?`,
@@ -2983,6 +3319,7 @@ A.doSignup = async () => {
   S.ui.af.email = em;
   if (!nm) e.name = 'Enter your name';
   if (!EMAIL_RE.test(em)) e.email = 'Enter a valid work email';
+  else if (!em.toLowerCase().endsWith('@snapsec.co')) e.email = 'Only @snapsec.co company email addresses are allowed to sign up';
   if (pw.length < 10 || !/[0-9\W]/.test(pw)) e.pw = 'Use at least 10 characters, including a number or symbol';
   if (Object.keys(e).length) {
     render();
