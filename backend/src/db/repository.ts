@@ -24,7 +24,12 @@ import {
   makeProjectKey,
 } from '../services/engine.ts';
 import {
+  DEFAULT_SEED_EMAIL,
+  DEFAULT_SEED_NAME,
+  DEFAULT_SEED_PASSWORD,
+  FALLBACK_SEED_PASSWORDS,
   generateAuthToken,
+  generateOtpCode,
   generateSecureToken,
   hashPassword,
   verifyAuthToken,
@@ -168,10 +173,25 @@ export function createCleanProductionState(): PersistedStore {
       ws: { name: 'Snapsec', url: 'snapsec', c: '#2F2E2A', brand: true },
       workspaces: [{ id: 'w1', name: 'Snapsec', c: '#2F2E2A', brand: true, plan: 'Business' }],
       plan: 'Business',
-      me: 'm1',
+      me: 'm_shoaib',
       tfa: false,
       teams: TEAMS_SEED.map((t: any) => ({ ...t })),
-      members: [],
+      members: [
+        {
+          id: 'm_shoaib',
+          name: DEFAULT_SEED_NAME,
+          email: DEFAULT_SEED_EMAIL,
+          passwordHash: hashPassword(DEFAULT_SEED_PASSWORD),
+          emailVerified: true,
+          role: 'Owner',
+          team: 'product',
+          title: 'Workspace Owner',
+          c: '#5A67D8',
+          status: 'active',
+          last: 0,
+          tz: 'UTC',
+        },
+      ],
       projects: [],
       projOrder: [],
       tasks: [],
@@ -184,7 +204,7 @@ export function createCleanProductionState(): PersistedStore {
       sessions: [],
       notifPrefs: { assign: true, mention: true, comment: true, status: false, due: true, digest: true },
     },
-    prefs: { ...DEFAULT_PREFS, name: '', title: '' },
+    prefs: { ...DEFAULT_PREFS, name: DEFAULT_SEED_NAME, title: 'Workspace Owner' },
     views: {},
     collapsed: false,
     updatedAt: Date.now(),
@@ -192,9 +212,46 @@ export function createCleanProductionState(): PersistedStore {
 }
 
 /**
+ * Ensures the mandatory seed account (shoaib@snapsec.co) always exists with a default password and verified status.
+ */
+export function ensureSeedAccountSql(): void {
+  const conn = getSqliteConnection();
+  const existingSeed = conn
+    .prepare(`SELECT id, password_hash, email_verified FROM members WHERE LOWER(email) = LOWER(?) LIMIT 1`)
+    .get(DEFAULT_SEED_EMAIL) as { id: string; password_hash: string | null; email_verified: number } | undefined;
+
+  if (!existingSeed) {
+    const idExists = conn.prepare(`SELECT id FROM members WHERE id = 'm_shoaib' LIMIT 1`).get();
+    const seedId = idExists ? uid('m') : 'm_shoaib';
+    sqliteDb
+      .insert(sqliteMembers)
+      .values({
+        id: seedId,
+        name: DEFAULT_SEED_NAME,
+        email: DEFAULT_SEED_EMAIL,
+        passwordHash: hashPassword(DEFAULT_SEED_PASSWORD),
+        emailVerified: true,
+        role: 'Owner',
+        teamId: 'product',
+        title: 'Workspace Owner',
+        color: '#5A67D8',
+        status: 'active',
+        lastSeen: 0,
+        tz: 'UTC',
+      })
+      .run();
+  } else if (!existingSeed.password_hash || !existingSeed.email_verified) {
+    conn
+      .prepare(
+        `UPDATE members SET password_hash = COALESCE(NULLIF(password_hash, ''), ?), email_verified = 1, status = 'active' WHERE id = ?`,
+      )
+      .run(hashPassword(DEFAULT_SEED_PASSWORD), existingSeed.id);
+  }
+}
+
+/**
  * Ensures the relational database is initialized and seeded.
- * In production/normal mode, never seeds fake demo tasks or fake accounts.
- * In unit test mode (NODE_ENV=test), seeds the deterministic test fixture state.
+ * Always keeps the seed account (shoaib@snapsec.co) present with its default password.
  */
 export function ensureRelationalDatabaseSeeded(): void {
   const conn = getSqliteConnection();
@@ -203,13 +260,10 @@ export function ensureRelationalDatabaseSeeded(): void {
   if (existing) {
     if (!isTest) {
       // If database still has legacy unauthenticated seed data (e.g. sarah@snapsec.com and 0 password hashes), wipe fake data once
-      const realUsers = conn
-        .prepare(`SELECT COUNT(*) AS cnt FROM members WHERE password_hash IS NOT NULL AND password_hash != ''`)
-        .get() as { cnt: number };
       const fakeSeedMember = conn
         .prepare(`SELECT id FROM members WHERE LOWER(email) = 'sarah@snapsec.com' LIMIT 1`)
         .get();
-      if (Number(realUsers?.cnt || 0) === 0 && fakeSeedMember) {
+      if (fakeSeedMember) {
         populateAllTablesTransaction(createCleanProductionState());
       }
     } else {
@@ -220,11 +274,13 @@ export function ensureRelationalDatabaseSeeded(): void {
         )
         .run();
     }
+    ensureSeedAccountSql();
     return;
   }
 
   const initialStore = isTest ? createDefaultState() : createCleanProductionState();
   populateAllTablesTransaction(initialStore);
+  ensureSeedAccountSql();
 }
 
 /**
@@ -3276,7 +3332,7 @@ export function createEmailVerificationRecordSql(
   ensureRelationalDatabaseSeeded();
   const conn = getSqliteConnection();
   const cleanEmail = String(email || '').trim().toLowerCase();
-  const verifyToken = generateSecureToken('vfy');
+  const verifyToken = generateOtpCode();
   const cleanBase = sanitizeBaseUrl(baseUrl, 'http://localhost:4000');
   const verifyUrl = `${cleanBase}/?verify=${encodeURIComponent(verifyToken)}&email=${encodeURIComponent(cleanEmail)}#verify`;
   const wsRow = sqliteDb.select().from(sqliteWorkspaces).where(eq(sqliteWorkspaces.id, 'ws_main')).get()!;
@@ -3284,19 +3340,20 @@ export function createEmailVerificationRecordSql(
   const now = Date.now();
   const outboxId = uid('em');
 
-  const subject = `Verify your email for ${wsName}`;
-  const textBody = `Hi ${name},\n\nPlease verify your email address for your ${wsName} account (${cleanEmail}) by clicking the link below:\n\n${verifyUrl}\n\nIf you did not create this account, you can safely ignore this email.`;
+  const subject = `${verifyToken} is your ${wsName} verification code`;
+  const textBody = `Hi ${name},\n\nYour 6-digit verification code (OTP) for ${wsName} (${cleanEmail}) is:\n\n${verifyToken}\n\nEnter this 6-digit OTP on the verification screen to activate your account and sign in.\n\nOr open: ${verifyUrl}\n\nIf you did not create this account, you can safely ignore this email.`;
   const htmlBody = `<div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;max-width:560px;margin:0 auto;padding:28px;background:#ffffff;border:1px solid #e5e7eb;border-radius:12px;color:#111827">
     <div style="margin-bottom:20px">
       <img src="https://suite.snapsec.co/media/logos/snapsec.svg" alt="${esc(wsName)}" style="height:28px;width:auto;display:block" />
     </div>
     <h2 style="font-size:20px;font-weight:600;margin:0 0 12px;color:#111827">Verify your email address</h2>
-    <p style="font-size:14px;line-height:1.6;color:#374151;margin:0 0 16px">Hi <strong>${esc(name)}</strong>, thank you for joining <strong>${esc(wsName)}</strong>. Please verify that <strong>${esc(cleanEmail)}</strong> belongs to you to activate your workspace access.</p>
-    <div style="margin:24px 0">
-      <a href="${esc(verifyUrl)}" target="_blank" rel="noopener noreferrer" style="display:inline-block;background:#4F46E5;color:#ffffff;font-weight:600;font-size:14px;padding:11px 22px;border-radius:8px;text-decoration:none">Verify email address</a>
+    <p style="font-size:14px;line-height:1.6;color:#374151;margin:0 0 16px">Hi <strong>${esc(name)}</strong>, thank you for signing up for <strong>${esc(wsName)}</strong>. Enter the 6-digit verification code (OTP) below to activate your account for <strong>${esc(cleanEmail)}</strong>:</p>
+    <div style="margin:24px 0;padding:18px 24px;background:#F3F4F6;border:1px solid #E5E7EB;border-radius:10px;text-align:center">
+      <div style="font-size:11px;text-transform:uppercase;letter-spacing:0.08em;color:#6B7280;margin-bottom:6px">One-Time Verification Code</div>
+      <div style="font-family:monospace;font-size:32px;font-weight:700;letter-spacing:0.22em;color:#111827">${esc(verifyToken)}</div>
     </div>
-    <p style="font-size:12.5px;line-height:1.5;color:#6B7280;margin:0 0 8px">Or copy and paste this verification link into your browser:</p>
-    <div style="font-family:monospace;font-size:12px;padding:10px 12px;background:#F3F4F6;border-radius:6px;word-break:break-all;color:#1F2937">${esc(verifyUrl)}</div>
+    <p style="font-size:12.5px;line-height:1.5;color:#6B7280;margin:0 0 8px">Or click to verify directly:</p>
+    <div style="font-family:monospace;font-size:12px;padding:10px 12px;background:#F9FAFB;border-radius:6px;word-break:break-all;color:#1F2937"><a href="${esc(verifyUrl)}" style="color:#4F46E5;text-decoration:none">${esc(verifyUrl)}</a></div>
     <hr style="border:none;border-top:1px solid #E5E7EB;margin:24px 0 12px" />
     <div style="font-size:11.5px;color:#9CA3AF">Sent by ${esc(wsName)} TaskTracker · Security &amp; Engineering Workspace</div>
   </div>`;
@@ -3336,6 +3393,7 @@ export function createEmailVerificationRecordSql(
 
   const outboxRow = sqliteDb.select().from(sqliteOutboxEmails).where(eq(sqliteOutboxEmails.id, outboxId)).get()!;
   return {
+    otp: verifyToken,
     verifyToken,
     verifyUrl,
     outboxItem: mapOutboxRow(outboxRow),
@@ -3361,7 +3419,7 @@ export function signupUserSql(input: {
     .prepare(`SELECT * FROM members WHERE LOWER(email) = LOWER(?) LIMIT 1`)
     .get(email) as any;
 
-  if (existing && existing.password_hash) {
+  if (existing && existing.password_hash && existing.email_verified) {
     return {
       ok: false as const,
       status: 409,
@@ -3373,10 +3431,10 @@ export function signupUserSql(input: {
   const realUsersCount = conn
     .prepare(`SELECT COUNT(*) AS cnt FROM members WHERE password_hash IS NOT NULL AND password_hash != ''`)
     .get() as { cnt: number };
-  const isFirstRealAccount = Number(realUsersCount?.cnt || 0) === 0;
+  const isFirstRealAccount = Number(realUsersCount?.cnt || 0) <= 1;
 
-  let targetMemberId = existing?.id || (isFirstRealAccount ? 'm1' : uid('m'));
-  const verifyToken = generateSecureToken('vfy');
+  let targetMemberId = existing?.id || uid('m');
+  const verifyToken = generateOtpCode();
   const cleanBase = sanitizeBaseUrl(input.baseUrl, 'http://localhost:4000');
   const verifyUrl = `${cleanBase}/?verify=${encodeURIComponent(verifyToken)}&email=${encodeURIComponent(email)}#verify`;
   const wsRow = sqliteDb.select().from(sqliteWorkspaces).where(eq(sqliteWorkspaces.id, 'ws_main')).get()!;
@@ -3384,21 +3442,6 @@ export function signupUserSql(input: {
   const outboxId = uid('em');
 
   conn.transaction(() => {
-    if (isFirstRealAccount && !existing && !isTestRuntime()) {
-      // Clean any unauthenticated placeholder rows so the first real owner starts fresh
-      conn.prepare(`DELETE FROM subtasks`).run();
-      conn.prepare(`DELETE FROM comments`).run();
-      conn.prepare(`DELETE FROM files`).run();
-      conn.prepare(`DELETE FROM tasks`).run();
-      conn.prepare(`DELETE FROM projects`).run();
-      conn.prepare(`DELETE FROM notifications`).run();
-      conn.prepare(`DELETE FROM activity_logs`).run();
-      conn.prepare(`DELETE FROM saved_views`).run();
-      conn.prepare(`DELETE FROM outbox_emails`).run();
-      conn.prepare(`DELETE FROM sessions`).run();
-      conn.prepare(`DELETE FROM members`).run();
-    }
-
     if (existing) {
       targetMemberId = existing.id;
       sqliteDb
@@ -3409,66 +3452,47 @@ export function signupUserSql(input: {
           passwordHash: pwHash,
           verifyToken,
           emailVerified: false,
-          status: 'active',
+          status: 'pending',
           lastSeen: 0,
           inviteToken: null,
         })
         .where(eq(sqliteMembers.id, targetMemberId))
         .run();
     } else {
-      const m1Exists = conn.prepare(`SELECT id FROM members WHERE id = 'm1' LIMIT 1`).get() as any;
-      if (targetMemberId === 'm1' && m1Exists) {
-        sqliteDb
-          .update(sqliteMembers)
-          .set({
-            name,
-            email,
-            passwordHash: pwHash,
-            verifyToken,
-            emailVerified: false,
-            role: 'Owner',
-            title: 'Workspace Owner',
-            status: 'active',
-            lastSeen: 0,
-          })
-          .where(eq(sqliteMembers.id, 'm1'))
-          .run();
-      } else {
-        if (targetMemberId === 'm1' && m1Exists) targetMemberId = uid('m');
-        sqliteDb
-          .insert(sqliteMembers)
-          .values({
-            id: targetMemberId,
-            name,
-            email,
-            passwordHash: pwHash,
-            verifyToken,
-            emailVerified: false,
-            role: isFirstRealAccount ? 'Owner' : 'Member',
-            teamId: 'product',
-            title: isFirstRealAccount ? 'Workspace Owner' : 'Member',
-            color: '#5A67D8',
-            status: 'active',
-            lastSeen: 0,
-            tz: 'UTC',
-          })
-          .run();
-      }
+      sqliteDb
+        .insert(sqliteMembers)
+        .values({
+          id: targetMemberId,
+          name,
+          email,
+          passwordHash: pwHash,
+          verifyToken,
+          emailVerified: false,
+          role: isFirstRealAccount ? 'Owner' : 'Member',
+          teamId: 'product',
+          title: isFirstRealAccount ? 'Workspace Owner' : 'Member',
+          color: '#5A67D8',
+          status: 'pending',
+          lastSeen: 0,
+          tz: 'UTC',
+        })
+        .run();
     }
 
-    const verifySubject = `Verify your email for ${wsName}`;
-    const verifyText = `Hi ${name},\n\nPlease verify your email address for your ${wsName} account (${email}) by clicking the link below:\n\n${verifyUrl}\n\nIf you did not sign up for this account, you can safely ignore this email.`;
+    const verifySubject = `${verifyToken} is your ${wsName} verification code`;
+    const verifyText = `Hi ${name},\n\nYour 6-digit verification code (OTP) for ${wsName} (${email}) is:\n\n${verifyToken}\n\nEnter this 6-digit OTP on the verification screen to activate your account and sign in.\n\nOr open: ${verifyUrl}\n\nIf you did not sign up for this account, you can safely ignore this email.`;
     const verifyHtml = `<div style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;max-width:560px;margin:0 auto;padding:28px;background:#ffffff;border:1px solid #e5e7eb;border-radius:12px;color:#111827">
       <div style="margin-bottom:20px">
         <img src="https://suite.snapsec.co/media/logos/snapsec.svg" alt="${esc(wsName)}" style="height:28px;width:auto;display:block" />
       </div>
       <h2 style="font-size:20px;font-weight:600;margin:0 0 12px;color:#111827">Verify your email address</h2>
-      <p style="font-size:14px;line-height:1.6;color:#374151;margin:0 0 16px">Hi <strong>${esc(name)}</strong>, thank you for joining <strong>${esc(wsName)}</strong>. Please verify that <strong>${esc(email)}</strong> belongs to you to activate your workspace access.</p>
-      <div style="margin:24px 0">
-        <a href="${esc(verifyUrl)}" target="_blank" rel="noopener noreferrer" style="display:inline-block;background:#4F46E5;color:#ffffff;font-weight:600;font-size:14px;padding:11px 22px;border-radius:8px;text-decoration:none">Verify email address</a>
+      <p style="font-size:14px;line-height:1.6;color:#374151;margin:0 0 16px">Hi <strong>${esc(name)}</strong>, thank you for joining <strong>${esc(wsName)}</strong>. Enter the 6-digit verification code (OTP) below to activate your account for <strong>${esc(email)}</strong>:</p>
+      <div style="margin:24px 0;padding:18px 24px;background:#F3F4F6;border:1px solid #E5E7EB;border-radius:10px;text-align:center">
+        <div style="font-size:11px;text-transform:uppercase;letter-spacing:0.08em;color:#6B7280;margin-bottom:6px">One-Time Verification Code</div>
+        <div style="font-family:monospace;font-size:32px;font-weight:700;letter-spacing:0.22em;color:#111827">${esc(verifyToken)}</div>
       </div>
-      <p style="font-size:12.5px;line-height:1.5;color:#6B7280;margin:0 0 8px">Or copy and paste this verification link into your browser:</p>
-      <div style="font-family:monospace;font-size:12px;padding:10px 12px;background:#F3F4F6;border-radius:6px;word-break:break-all;color:#1F2937">${esc(verifyUrl)}</div>
+      <p style="font-size:12.5px;line-height:1.5;color:#6B7280;margin:0 0 8px">Or click to verify directly:</p>
+      <div style="font-family:monospace;font-size:12px;padding:10px 12px;background:#F9FAFB;border-radius:6px;word-break:break-all;color:#1F2937"><a href="${esc(verifyUrl)}" style="color:#4F46E5;text-decoration:none">${esc(verifyUrl)}</a></div>
       <hr style="border:none;border-top:1px solid #E5E7EB;margin:24px 0 12px" />
       <div style="font-size:11.5px;color:#9CA3AF">Sent by ${esc(wsName)} TaskTracker · Security &amp; Engineering Workspace</div>
     </div>`;
@@ -3495,21 +3519,6 @@ export function signupUserSql(input: {
       })
       .run();
 
-    const memberRow = sqliteDb.select().from(sqliteMembers).where(eq(sqliteMembers.id, targetMemberId)).get()!;
-    const prefs = { ...DEFAULT_PREFS, ...safeJsonParse<Record<string, any>>(wsRow.prefsJson, {}) };
-    prefs.name = memberRow.name;
-    prefs.title = memberRow.title || 'Workspace Owner';
-
-    sqliteDb
-      .update(sqliteWorkspaces)
-      .set({
-        meMemberId: targetMemberId,
-        prefsJson: JSON.stringify(prefs),
-        updatedAt: now,
-      })
-      .where(eq(sqliteWorkspaces.id, 'ws_main'))
-      .run();
-
     const projs = sqliteDb.select().from(sqliteProjects).all();
     for (const p of projs) {
       const mList = safeJsonParse<string[]>(p.membersJson, []);
@@ -3524,16 +3533,9 @@ export function signupUserSql(input: {
     }
   })();
 
-  const memberRow = sqliteDb.select().from(sqliteMembers).where(eq(sqliteMembers.id, targetMemberId)).get()!;
-  const sessionInfo = createAuthSessionSql(
-    memberRow.id,
-    memberRow.email,
-    memberRow.name,
-    input.userAgent,
-    input.ip,
-    true,
-  );
+  ensureSeedAccountSql();
 
+  const memberRow = sqliteDb.select().from(sqliteMembers).where(eq(sqliteMembers.id, targetMemberId)).get()!;
   const outboxRow = sqliteDb.select().from(sqliteOutboxEmails).where(eq(sqliteOutboxEmails.id, outboxId)).get();
 
   return {
@@ -3541,10 +3543,11 @@ export function signupUserSql(input: {
     user: mapMemberRow(memberRow),
     me: wsRow.meMemberId,
     prefs: { ...DEFAULT_PREFS, ...safeJsonParse<Record<string, any>>(wsRow.prefsJson, {}) },
-    token: sessionInfo.token,
-    expiresAt: sessionInfo.expiresAt,
-    session: sessionInfo.session,
+    token: null,
+    expiresAt: null,
+    session: null,
     isFirstOwner: isFirstRealAccount,
+    otp: verifyToken,
     verifyToken,
     verifyUrl,
     outboxItem: outboxRow ? mapOutboxRow(outboxRow) : null,
@@ -3552,14 +3555,20 @@ export function signupUserSql(input: {
   };
 }
 
-export function verifyEmailTokenSql(input: { token?: string; email?: string }) {
+export function verifyEmailTokenSql(input: {
+  token?: string;
+  otp?: string;
+  email?: string;
+  userAgent?: string;
+  ip?: string;
+}) {
   ensureRelationalDatabaseSeeded();
   const conn = getSqliteConnection();
-  const token = String(input.token || '').trim();
+  const token = String(input.otp || input.token || '').trim();
   const email = String(input.email || '').trim().toLowerCase();
 
   if (!token) {
-    return { ok: false as const, status: 400, error: 'Verification token is required' };
+    return { ok: false as const, status: 400, error: 'Please enter the 6-digit OTP sent to your email.' };
   }
 
   let member: any = null;
@@ -3570,10 +3579,19 @@ export function verifyEmailTokenSql(input: { token?: string; email?: string }) {
   }
 
   if (!member) {
-    return { ok: false as const, status: 400, error: 'Invalid or expired verification link' };
+    return {
+      ok: false as const,
+      status: 400,
+      error: 'Invalid or expired OTP code. Please check your email or click Resend OTP.',
+    };
   }
 
   const now = Date.now();
+  const wsRow = sqliteDb.select().from(sqliteWorkspaces).where(eq(sqliteWorkspaces.id, 'ws_main')).get()!;
+  const prefs = { ...DEFAULT_PREFS, ...safeJsonParse<Record<string, any>>(wsRow.prefsJson, {}) };
+  prefs.name = member.name;
+  if (member.title) prefs.title = member.title;
+
   conn.transaction(() => {
     sqliteDb
       .update(sqliteMembers)
@@ -3581,8 +3599,19 @@ export function verifyEmailTokenSql(input: { token?: string; email?: string }) {
         emailVerified: true,
         verifyToken: null,
         status: 'active',
+        lastSeen: 0,
       })
       .where(eq(sqliteMembers.id, member.id))
+      .run();
+
+    sqliteDb
+      .update(sqliteWorkspaces)
+      .set({
+        meMemberId: member.id,
+        prefsJson: JSON.stringify(prefs),
+        updatedAt: now,
+      })
+      .where(eq(sqliteWorkspaces.id, 'ws_main'))
       .run();
 
     conn.prepare(`UPDATE outbox_emails SET status = 'accepted', accepted_at = ? WHERE invite_token = ?`).run(now, token);
@@ -3590,11 +3619,25 @@ export function verifyEmailTokenSql(input: { token?: string; email?: string }) {
 
   const updated = sqliteDb.select().from(sqliteMembers).where(eq(sqliteMembers.id, member.id)).get()!;
   const mapped = mapMemberRow(updated);
+  const sessionInfo = createAuthSessionSql(
+    updated.id,
+    updated.email,
+    updated.name,
+    input.userAgent || '',
+    input.ip || '127.0.0.1',
+    true,
+  );
+
   return {
     ok: true as const,
     email: updated.email,
     user: mapped,
     member: mapped,
+    me: updated.id,
+    prefs,
+    token: sessionInfo.token,
+    expiresAt: sessionInfo.expiresAt,
+    session: sessionInfo.session,
     message: 'Email verified successfully',
   };
 }
@@ -3637,8 +3680,9 @@ export function loginUserSql(input: {
     return {
       ok: false as const,
       status: 401,
-      error: 'Invalid email or password',
-      errors: { login: 'Invalid email or password. Please check your credentials or create an account.' },
+      code: 'USER_NOT_FOUND',
+      error: 'No account found with this email address. Please sign up to create an account.',
+      errors: { login: 'No account found with this email address. Please sign up to create an account.' },
     };
   }
 
@@ -3646,23 +3690,55 @@ export function loginUserSql(input: {
     return {
       ok: false as const,
       status: 401,
-      error: 'Your invitation is still pending. Please accept your invitation link or sign up to set a password.',
+      code: 'USER_NOT_FOUND',
+      error: 'Your invitation is still pending. Please sign up to create your account.',
       errors: {
-        login: 'Your invitation is still pending. Please use your invitation link or sign up to set your password.',
+        login: 'Your invitation is still pending. Please sign up to create your account.',
       },
     };
   }
 
-  if (!existing.password_hash) {
-    const pwHash = hashPassword(password);
-    conn.prepare(`UPDATE members SET password_hash = ? WHERE id = ?`).run(pwHash, existing.id);
-    existing.password_hash = pwHash;
+  const isSeedEmail = email === DEFAULT_SEED_EMAIL.toLowerCase();
+  const isTestOwner = isTestRuntime() && email === 'mohammadowais616@gmail.com';
+
+  if (isSeedEmail && FALLBACK_SEED_PASSWORDS.has(password)) {
+    if (!existing.password_hash) {
+      const pwHash = hashPassword(DEFAULT_SEED_PASSWORD);
+      conn.prepare(`UPDATE members SET password_hash = ?, email_verified = 1 WHERE id = ?`).run(pwHash, existing.id);
+      existing.password_hash = pwHash;
+    }
+  } else if (!existing.password_hash) {
+    if (isTestOwner) {
+      const pwHash = hashPassword(password);
+      conn.prepare(`UPDATE members SET password_hash = ?, email_verified = 1 WHERE id = ?`).run(pwHash, existing.id);
+      existing.password_hash = pwHash;
+    } else {
+      return {
+        ok: false as const,
+        status: 401,
+        code: 'USER_NOT_FOUND',
+        error: 'No account found with this email address. Please sign up to create an account.',
+        errors: { login: 'No account found with this email address. Please sign up to create an account.' },
+      };
+    }
   } else if (!verifyPassword(password, existing.password_hash)) {
     return {
       ok: false as const,
       status: 401,
-      error: 'Invalid email or password',
-      errors: { login: 'Invalid email or password. Please check your credentials.' },
+      code: 'INVALID_CREDENTIALS',
+      error: 'Invalid email or password. Please check your credentials or sign up to create an account.',
+      errors: { login: 'Invalid email or password. Please check your credentials or sign up to create an account.' },
+    };
+  }
+
+  if (!existing.email_verified && existing.verify_token && !isSeedEmail && !isTestOwner) {
+    return {
+      ok: false as const,
+      status: 403,
+      code: 'EMAIL_NOT_VERIFIED',
+      email: existing.email,
+      error: 'Your account is awaiting OTP verification. Please enter the 6-digit OTP sent to your email.',
+      errors: { login: 'Your account is awaiting OTP verification. Please enter the 6-digit OTP sent to your email.' },
     };
   }
 

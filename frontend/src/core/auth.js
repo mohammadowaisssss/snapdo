@@ -16,8 +16,15 @@ export const PUBLIC_AUTH_ROUTES = new Set([
   'reset',
   'reset-done',
   'verify',
+  'onboarding',
   'invite',
 ]);
+
+export function isPublicAuthRoute(route) {
+  if (!route || typeof route !== 'string') return false;
+  const clean = route.replace(/^#/, '').trim();
+  return PUBLIC_AUTH_ROUTES.has(clean);
+}
 
 export function getStoredAuthToken() {
   try {

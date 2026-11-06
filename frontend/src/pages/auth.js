@@ -61,7 +61,7 @@ export function renderAuth() {
     return authShell(
       `<form class="auth-card${S.ui.fx.auth ? ' fx-auth' : ''}" data-submit="doLogin" novalidate>
     <div style="display:flex;justify-content:center">${LOGO(30)}</div><h1>Sign in to your account</h1><p class="sub">Enter your email and password to access ${esc(D().ws.name)}</p>
-    ${e.login ? `<div class="alert danger" role="alert">${ic('circle-alert', 15)}<span>${esc(e.login)}</span></div>` : ''}
+    ${e.login ? `<div class="alert danger" role="alert" style="flex-direction:column;align-items:flex-start;gap:8px"><div class="row" style="gap:8px">${ic('circle-alert', 15)}<span>${esc(e.login)}</span></div>${e.suggestSignup ? `<button type="button" class="btn btn-sm btn-secondary" data-a="auth" data-v="signup">Sign up to create an account</button>` : ''}</div>` : ''}
     <div class="field"><label class="label" for="l-email">Email</label><input class="input input-lg ${icls('email')}" id="l-email" type="email" value="${esc(f.email)}" placeholder="name@company.com" autocomplete="email" aria-invalid="${!!e.email}" aria-describedby="email-err">${ferr('email')}</div>
     <div class="field"><div class="row"><label class="label" for="l-pw">Password</label><span class="sp"></span><button type="button" class="link" style="font-size:12.5px" data-a="auth" data-v="forgot">Forgot password?</button></div>
       <div class="inwrap"><input class="input input-lg ${icls('pw')}" id="l-pw" type="${S.ui.showPw ? 'text' : 'password'}" placeholder="Enter your password" autocomplete="current-password" style="padding-right:38px" aria-invalid="${!!e.pw}"><button type="button" class="ibtn ibtn-sm" style="position:absolute;right:5px" data-a="toggleShowPw" aria-label="${S.ui.showPw ? 'Hide' : 'Show'} password">${ic(S.ui.showPw ? 'eye-off' : 'eye', 15)}</button></div>${ferr('pw')}</div>
@@ -109,10 +109,23 @@ export function renderAuth() {
     );
 
   if (s === 'verify')
-    return authShell(`<div class="auth-card${S.ui.fx.auth ? ' fx-auth' : ''}"><div style="display:flex;justify-content:center"><span class="ftype" style="--c:var(--accent);width:44px;height:44px;border-radius:11px">${ic('mail', 20)}</span></div><h1>Verify your email</h1><p class="sub">We sent a verification link to <b style="color:var(--text)">${esc(f.email)}</b>. Click it to activate your account.</p>
-    <button class="btn btn-primary btn-lg btn-block" data-a="verified">Continue to workspace setup</button>
-    <button class="btn btn-secondary btn-lg btn-block" data-a="resend" data-v="verify" id="resend-btn" ${S.ui.resendT > 0 ? 'disabled' : ''}>${S.ui.resendT > 0 ? `Resend email in <span class="num" id="resend-t">${S.ui.resendT}</span>s` : 'Resend email'}</button>
-    <p class="auth-foot">Wrong email? <button class="link" data-a="auth" data-v="signup">Change it</button></p></div>`);
+    return authShell(
+      `<form class="auth-card${S.ui.fx.auth ? ' fx-auth' : ''}" data-submit="doVerifyOtp" novalidate>
+        <div style="display:flex;justify-content:center"><span class="ftype" style="--c:var(--accent);width:44px;height:44px;border-radius:11px">${ic('mail', 20)}</span></div>
+        <h1>Verify your email</h1>
+        <p class="sub">We sent a 6-digit verification code (OTP) to <b style="color:var(--text)">${esc(f.email)}</b>. Enter the OTP below to activate your account and sign in.</p>
+        ${e.otp ? `<div class="alert danger" role="alert">${ic('circle-alert', 15)}<span>${esc(e.otp)}</span></div>` : ''}
+        <div class="field">
+          <label class="label" for="v-otp">6-digit verification code (OTP)</label>
+          <input class="input input-lg ${icls('otp')}" id="v-otp" type="text" inputmode="numeric" maxlength="6" autocomplete="one-time-code" placeholder="000000" value="${esc(S.ui.otpValue || '')}" style="letter-spacing:0.28em;font-family:var(--mono);font-size:20px;font-weight:600;text-align:center">
+          ${ferr('otp')}
+        </div>
+        <button type="submit" class="btn btn-primary btn-lg btn-block" data-a="doVerifyOtp" id="verify-otp-btn">Verify OTP &amp; sign in</button>
+        <button type="button" class="btn btn-secondary btn-lg btn-block" data-a="resend" data-v="verify" id="resend-btn" ${S.ui.resendT > 0 ? 'disabled' : ''}>${S.ui.resendT > 0 ? `Resend OTP in <span class="num" id="resend-t">${S.ui.resendT}</span>s` : 'Resend OTP'}</button>
+        <p class="auth-foot">Wrong email? <button type="button" class="link" data-a="auth" data-v="signup">Back to sign up</button></p>
+      </form>`,
+      `<button class="btn btn-ghost btn-sm" data-a="auth" data-v="login">Sign in</button>`,
+    );
 
   return '';
 }

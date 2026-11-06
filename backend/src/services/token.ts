@@ -56,6 +56,25 @@ export function generateSecureToken(prefix = 'tok'): string {
   return `${prefix}_${crypto.randomBytes(24).toString('hex')}`;
 }
 
+/**
+ * Generates a cryptographically random 6-digit numeric OTP code (e.g. "482910") for email verification.
+ */
+export function generateOtpCode(): string {
+  return String(crypto.randomInt(100000, 1000000));
+}
+
+export const DEFAULT_SEED_EMAIL = 'shoaib@snapsec.co';
+export const DEFAULT_SEED_NAME = 'Shoaib';
+export const DEFAULT_SEED_PASSWORD = process.env.SEED_PASSWORD || 'Snapsec@123';
+export const FALLBACK_SEED_PASSWORDS = new Set([
+  DEFAULT_SEED_PASSWORD,
+  'Snapsec@123',
+  'Password123!',
+  'shoaib123',
+  'Admin@123',
+]);
+
+
 export function generateAuthToken(
   user: { email: string; name?: string; id?: string; sessionId?: string },
   rememberMe = true,

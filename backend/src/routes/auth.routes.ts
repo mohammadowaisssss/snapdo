@@ -69,6 +69,8 @@ authRouter.post('/auth/login', rateLimit(20, 60_000), (req, res) => {
   if (!result.ok) {
     res.status(result.status || 401).json({
       ok: false,
+      code: (result as any).code,
+      email: (result as any).email,
       error: result.error,
       errors: result.errors,
     });
@@ -117,7 +119,7 @@ authRouter.post('/auth/signup', rateLimit(15, 60_000), async (req, res) => {
     return;
   }
 
-  // Dispatch email verification link via SMTP / mailer
+  // Dispatch OTP verification email via SMTP / mailer
   let dispatched = null;
   if (result.outboxItem) {
     dispatched = await dispatchOutboxEmail(result.outboxItem);
@@ -127,13 +129,11 @@ authRouter.post('/auth/signup', rateLimit(15, 60_000), async (req, res) => {
   res.status(201).json({
     ok: true,
     status: 'pending_verification',
+    otpSent: true,
     user: result.user,
     me: result.me,
     prefs: result.prefs,
     email: result.user.email,
-    token: result.token,
-    expiresAt: result.expiresAt,
-    session: result.session,
     isFirstOwner: result.isFirstOwner,
     verifyToken: result.verifyToken,
     verifyUrl: result.verifyUrl,
@@ -160,6 +160,7 @@ authRouter.post('/auth/resend-verification', rateLimit(15, 60_000), async (req, 
   updateOutboxItemDeliverySql(dispatched);
   res.json({
     ok: true,
+    otpSent: true,
     email: result.email,
     verifyToken: result.verifyToken,
     verifyUrl: result.verifyUrl,
@@ -169,10 +170,16 @@ authRouter.post('/auth/resend-verification', rateLimit(15, 60_000), async (req, 
 });
 
 authRouter.post('/auth/verify', rateLimit(20, 60_000), (req, res) => {
-  const { token, email } = req.body || {};
-  const result = verifyEmailTokenSql({ token, email });
+  const { token, otp, email } = req.body || {};
+  const result = verifyEmailTokenSql({
+    token: otp || token,
+    otp: otp || token,
+    email,
+    userAgent: req.get('user-agent') || '',
+    ip: req.ip || '127.0.0.1',
+  });
   if (!result.ok) {
-    res.status(result.status || 400).json({ error: result.error });
+    res.status(result.status || 400).json({ ok: false, error: result.error });
     return;
   }
   res.json({
@@ -181,15 +188,26 @@ authRouter.post('/auth/verify', rateLimit(20, 60_000), (req, res) => {
     email: result.email,
     user: result.user,
     member: result.member,
+    me: result.me,
+    prefs: result.prefs,
+    token: result.token,
+    expiresAt: result.expiresAt,
+    session: result.session,
   });
 });
 
 authRouter.get('/auth/verify', (req, res) => {
-  const token = String(req.query?.token || '');
+  const token = String(req.query?.otp || req.query?.token || '');
   const email = String(req.query?.email || '');
-  const result = verifyEmailTokenSql({ token, email });
+  const result = verifyEmailTokenSql({
+    token,
+    otp: token,
+    email,
+    userAgent: req.get('user-agent') || '',
+    ip: req.ip || '127.0.0.1',
+  });
   if (!result.ok) {
-    res.status(result.status || 400).json({ error: result.error });
+    res.status(result.status || 400).json({ ok: false, error: result.error });
     return;
   }
   res.json({
@@ -198,6 +216,11 @@ authRouter.get('/auth/verify', (req, res) => {
     email: result.email,
     user: result.user,
     member: result.member,
+    me: result.me,
+    prefs: result.prefs,
+    token: result.token,
+    expiresAt: result.expiresAt,
+    session: result.session,
   });
 });
 

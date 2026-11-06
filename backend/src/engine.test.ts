@@ -1239,8 +1239,52 @@ test('SMTP configuration resolution and mailer utilization for verification & pa
     const outbox = getOutboxEmailsSql();
     const forgotEmail = outbox.find(item => item.to === apiTestEmail && item.subject.includes('Reset'));
     assert.ok(forgotEmail, 'Outbox must contain password reset email for user');
+
+    // E. Seed account shoaib@snapsec.co is ALWAYS present and can log in with default password
+    const seedLoginReq = await fetch(`${base}/api/auth/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email: 'shoaib@snapsec.co', password: 'Snapsec@123' }),
+    });
+    assert.equal(seedLoginReq.status, 200, 'Seed account shoaib@snapsec.co must log in with default password');
+    const seedLoginData = await seedLoginReq.json();
+    assert.equal(seedLoginData.ok, true);
+    assert.ok(seedLoginData.token, 'Seed account login must issue JWT token');
+    assert.equal(seedLoginData.user.email, 'shoaib@snapsec.co');
+
+    // F. Unregistered account login fails with 401 and tells user to sign up
+    const unknownLoginReq = await fetch(`${base}/api/auth/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email: `unregistered-${Date.now()}@snapsec.co`, password: 'Snapsec@123' }),
+    });
+    assert.equal(unknownLoginReq.status, 401);
+    const unknownLoginData = await unknownLoginReq.json();
+    assert.equal(unknownLoginData.ok, false);
+    assert.equal(unknownLoginData.code, 'USER_NOT_FOUND');
+    assert.ok(
+      unknownLoginData.error.toLowerCase().includes('sign up'),
+      'Unregistered login error must tell user to sign up',
+    );
+
+    // G. Verify OTP is a 6-digit number and verifying OTP issues an authenticated session token
+    assert.match(resendData.verifyToken, /^\d{6}$/, 'OTP code must be 6 digits');
+    assert.ok(verifyData.token, 'Verifying OTP must log the user in by returning a session token');
+
+    // H. Verify frontend auth.js does NOT contain any OTP bypass button
+    const fs = await import('node:fs');
+    const authJsSource = fs.readFileSync(new URL('../../frontend/src/pages/auth.js', import.meta.url), 'utf8');
+    assert.ok(
+      !authJsSource.includes('data-a="verified"'),
+      'auth.js must NOT contain a button that bypasses OTP verification',
+    );
+    assert.ok(
+      authJsSource.includes('data-a="doVerifyOtp"'),
+      'auth.js must contain the OTP verification submit button',
+    );
   } finally {
     server.close();
   }
 });
+
 

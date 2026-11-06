@@ -144,10 +144,10 @@ export const api = {
       method: 'POST',
       body: { email, baseUrl: typeof window !== 'undefined' ? window.location.origin : 'http://localhost:4000' },
     }),
-  verifyEmail: (token, email) =>
+  verifyEmail: (tokenOrOtp, email) =>
     request('/api/auth/verify', {
       method: 'POST',
-      body: { token, email },
+      body: { token: tokenOrOtp, otp: tokenOrOtp, email },
     }),
   resetPassword: (password, confirmPassword, token, email) =>
     request('/api/auth/reset', { method: 'POST', body: { password, confirmPassword, token, email } }),

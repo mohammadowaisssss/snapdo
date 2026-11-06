@@ -171,19 +171,18 @@ import { ROUTE_NAMES, render, go } from './shell/render.js';
             if (res.token) {
               saveAuthSession(res.token, res.member, res.expiresAt);
             }
-            S.ui.auth = 'onboarding';
-            S.ui.onb = 0;
+            S.ui.auth = null;
             try {
-              history.replaceState({}, '', location.pathname + (location.hash || ''));
+              history.replaceState({}, '', location.pathname + '#home');
             } catch {
               /* ignore */
             }
-            render();
-            toast(`Email verified successfully! Welcome to Snapsec, ${res.member.name}!`);
+            go(S.prefs.home || 'home');
+            toast(`Account verified — welcome to Snapsec, ${res.member.name}!`);
           }
         })
         .catch(err => {
-          toast(err?.message || 'Verification link expired or invalid', 'error');
+          toast(err?.message || 'Invalid or expired OTP code', 'error');
         });
     } else if (inviteToken || inviteEmail) {
       api

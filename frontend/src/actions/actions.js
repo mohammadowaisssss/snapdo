@@ -10,7 +10,7 @@ import { applyMarkdownCommand, normalizeHtmlToMarkdown } from '../core/markdown.
 import { safeDownloadUrl, safeHref } from '../core/security.js';
 import { clearAuthSession, saveAuthSession } from '../core/auth.js';
 import { authorizeGmailSenderPopup, getGmailAccessToken, getGoogleSenderEmail, signInWithGooglePopup, signOutFromFirebase } from '../core/firebase.js';
-import { D, DEFAULT_PREFS, S, allTasks, applyAuthenticatedUser, canSee, commentsOf, logAct, me, mem, pColor, progressOf, proj, save, task, tasksOf, visibleProjects } from '../core/store.js';
+import { D, DEFAULT_PREFS, S, allTasks, applyAuthenticatedUser, canSee, commentsOf, hydrateFromBackend, logAct, me, mem, pColor, progressOf, proj, save, task, tasksOf, visibleProjects } from '../core/store.js';
 import { fileType, fsize } from '../ui/helpers.js';
 import { effectiveDark } from '../core/theme.js';
 import { mutate, toast } from '../ui/toast.js';
@@ -2882,13 +2882,18 @@ export const EMAIL_RE = /^\S+@\S+\.\S+$/;
 export function enterApp(msg) {
   S.ui.auth = null;
   S.ui.errors = {};
+  try {
+    location.hash = S.prefs.home || 'home';
+  } catch {
+    /* ignore */
+  }
   go(S.prefs.home || 'home');
-  toast(msg);
+  if (msg) toast(msg);
 }
 A.doLogin = async () => {
   const e = (S.ui.errors = {});
-  const em = $('#l-email').value.trim(),
-    pw = $('#l-pw').value;
+  const em = ($('#l-email')?.value || '').trim(),
+    pw = $('#l-pw')?.value || '';
   S.ui.af.email = em;
   if (!em) e.email = 'Enter your email address';
   else if (!EMAIL_RE.test(em)) e.email = 'Enter a valid email, like name@company.com';
@@ -2896,20 +2901,44 @@ A.doLogin = async () => {
   if (Object.keys(e).length) {
     render();
     (e.email ? $('#l-email') : $('#l-pw'))?.focus();
-    if (!e.email) $('#l-pw').value = pw;
+    if (!e.email && $('#l-pw')) $('#l-pw').value = pw;
     return;
   }
-  const member = applyAuthenticatedUser({ email: em });
   try {
     const res = await api.login(em, pw);
-    if (res?.token) {
-      saveAuthSession(res.token, res.user || member || { email: em }, res.expiresAt);
+    if (!res?.token) {
+      throw new Error('Authentication failed. Please sign up to create an account.');
     }
-  } catch {
-    /* fallback to local session if network offline */
-    saveAuthSession(`snapsec-local.${btoa(JSON.stringify({ email: em, exp: Math.floor(Date.now() / 1000) + 7 * 86400 }))}.sig`, member || { email: em });
+    const userObj = res.user || { email: em };
+    saveAuthSession(res.token, userObj, res.expiresAt);
+    const member = applyAuthenticatedUser(userObj);
+    hydrateFromBackend(() => render());
+    enterApp(`Signed in as ${member ? `${member.name} (${member.email})` : em}`);
+  } catch (err) {
+    if (err?.data?.code === 'EMAIL_NOT_VERIFIED') {
+      S.ui.af.email = em;
+      S.ui.auth = 'verify';
+      clearInterval(startResend._i);
+      S.ui.resendT = 0;
+      S.ui.errors = {
+        otp: err.data.error || 'Please verify your account using the 6-digit OTP sent to your email.',
+      };
+      api.resendVerification(em).catch(() => {});
+      render();
+      return;
+    }
+    S.ui.errors = {
+      login:
+        err?.data?.errors?.login ||
+        err?.data?.error ||
+        err?.message ||
+        'No account found or invalid credentials. Please sign up to create an account.',
+      suggestSignup: true,
+    };
+    render();
+    if ($('#l-email')) $('#l-email').value = em;
+    if ($('#l-pw')) $('#l-pw').value = pw;
   }
-  loadingBtn('login-btn', 750, () => enterApp(`Signed in as ${member ? `${member.name} (${member.email})` : em}`));
 };
 A.socialAuth = async el => {
   const provider = el.dataset.v || 'Google';
@@ -2940,16 +2969,16 @@ A.socialAuth = async el => {
     }
     return;
   }
-  const email = S.ui.af?.email || me()?.email || 'mohammadowais616@gmail.com';
+  const email = S.ui.af?.email || me()?.email || 'shoaib@snapsec.co';
   const member = applyAuthenticatedUser({ email, provider });
   saveAuthSession(`snapsec-${provider.toLowerCase()}.${btoa(JSON.stringify({ email, exp: Math.floor(Date.now() / 1000) + 7 * 86400 }))}.sig`, member || { email });
   setTimeout(() => enterApp(`Signed in with ${provider} as ${member?.name || email}`), 600);
 };
-A.doSignup = () => {
+A.doSignup = async () => {
   const e = (S.ui.errors = {});
-  const nm = $('#s-name').value.trim(),
-    em = $('#s-email').value.trim(),
-    pw = $('#s-pw').value;
+  const nm = ($('#s-name')?.value || '').trim(),
+    em = ($('#s-email')?.value || '').trim(),
+    pw = $('#s-pw')?.value || '';
   S.ui.af.name = nm;
   S.ui.af.email = em;
   if (!nm) e.name = 'Enter your name';
@@ -2957,18 +2986,70 @@ A.doSignup = () => {
   if (pw.length < 10 || !/[0-9\W]/.test(pw)) e.pw = 'Use at least 10 characters, including a number or symbol';
   if (Object.keys(e).length) {
     render();
-    $('#s-email').value = em;
+    if ($('#s-name')) $('#s-name').value = nm;
+    if ($('#s-email')) $('#s-email').value = em;
     return;
   }
-  applyAuthenticatedUser({ name: nm, email: em });
-  api.signup(nm, em, pw).then(res => {
-    if (res?.token) saveAuthSession(res.token, res.user || { name: nm, email: em }, res.expiresAt);
-  }).catch(() => {});
-  loadingBtn('signup-btn', 800, () => {
+  try {
+    const res = await api.signup(nm, em, pw);
+    S.ui.otpValue = '';
+    S.ui.errors = {};
     S.ui.auth = 'verify';
+    try {
+      location.hash = 'verify';
+    } catch {
+      /* ignore */
+    }
     startResend();
     render();
-  });
+    setTimeout(() => $('#v-otp')?.focus(), 30);
+    if (res?.deliveredToInbox) {
+      toast(`6-digit OTP verification code sent via SMTP to ${em}`);
+    } else {
+      toast(`6-digit OTP verification code sent to ${em}`);
+    }
+  } catch (err) {
+    S.ui.errors = err?.data?.errors || {
+      signup: err?.data?.error || err?.message || 'Unable to create account. Please try again.',
+    };
+    render();
+    if ($('#s-name')) $('#s-name').value = nm;
+    if ($('#s-email')) $('#s-email').value = em;
+  }
+};
+A.doVerifyOtp = async () => {
+  const otp = ($('#v-otp')?.value || '').trim();
+  S.ui.otpValue = otp;
+  const em = S.ui.af.email || S.user?.email || '';
+  if (!otp || otp.length < 6) {
+    clearInterval(startResend._i);
+    S.ui.resendT = 0;
+    S.ui.errors = { otp: 'Please enter the 6-digit OTP code sent to your email.' };
+    render();
+    setTimeout(() => $('#v-otp')?.focus(), 20);
+    return;
+  }
+  try {
+    const res = await api.verifyEmail(otp, em);
+    const verifiedUser = res?.user || res?.member || { name: S.ui.af.name || em.split('@')[0], email: em };
+    if (res?.token) {
+      saveAuthSession(res.token, verifiedUser, res.expiresAt);
+    }
+    applyAuthenticatedUser(verifiedUser);
+    S.ui.otpValue = '';
+    S.ui.errors = {};
+    hydrateFromBackend(() => render());
+    enterApp(`Account verified — welcome to ${D().ws?.name || 'Snapsec'}, ${verifiedUser.name || em}!`);
+  } catch (err) {
+    // Enable Resend OTP immediately when OTP verification fails
+    clearInterval(startResend._i);
+    S.ui.resendT = 0;
+    S.ui.errors = {
+      otp: err?.data?.error || err?.message || 'Invalid OTP code. Please check your email or click Resend OTP.',
+    };
+    render();
+    setTimeout(() => $('#v-otp')?.focus(), 20);
+  }
 };
 export function startResend() {
   S.ui.resendT = 30;
@@ -2985,18 +3066,24 @@ export function startResend() {
 }
 A.resend = async el => {
   if (el.dataset.v === 'verify') {
+    S.ui.errors = {};
+    S.ui.otpValue = '';
     startResend();
     render();
     const em = S.ui.af.email || S.user?.email;
     try {
       const res = await api.resendVerification(em);
       if (res?.deliveredToInbox) {
-        toast(`Verification link sent via SMTP to ${em}`);
+        toast(`New 6-digit OTP sent via SMTP to ${em}`);
       } else {
-        toast(`Verification link sent to ${em}`);
+        toast(`New 6-digit OTP sent to ${em}`);
       }
+      setTimeout(() => $('#v-otp')?.focus(), 20);
     } catch (err) {
-      toast(err?.message || `Unable to send verification link to ${em}`, 'error');
+      clearInterval(startResend._i);
+      S.ui.resendT = 0;
+      render();
+      toast(err?.message || `Unable to resend OTP to ${em}`, 'error');
     }
   } else {
     const em = S.ui.af.email || S.user?.email;
@@ -3007,13 +3094,6 @@ A.resend = async el => {
       toast(`Reset link sent to ${em}`);
     }
   }
-};
-A.verified = () => {
-  S.ui.auth = 'onboarding';
-  S.ui.onb = 0;
-  S.ui.onbData.ws = '';
-  S.ui.onbData.url = '';
-  render();
 };
 A.doForgot = () => {
   const em = $('#f-email').value.trim();
