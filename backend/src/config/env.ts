@@ -8,6 +8,10 @@ export const ENV = {
   DATA_DIR: process.env.DATA_DIR || '',
   APP_URL: process.env.APP_URL || 'http://localhost:4000',
   CORS_ORIGIN: process.env.CORS_ORIGIN || '*',
+  AUTHORIZED_DOMAINS: (process.env.AUTHORIZED_DOMAINS || 'snapsec.co')
+    .split(',')
+    .map(d => d.trim().toLowerCase().replace(/^@/, ''))
+    .filter(Boolean),
   PGHOST: process.env.SQL_HOST || process.env.PGHOST || 'db',
   PGPORT: Number(process.env.PGPORT || 5432),
   PGUSER: process.env.SQL_USER || process.env.PGUSER || 'snapsec',

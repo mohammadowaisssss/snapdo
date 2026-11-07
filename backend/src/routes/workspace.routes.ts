@@ -96,7 +96,12 @@ workspaceRouter.get('/activity', (_req, res) => {
 // Preferences & Workspace Settings
 workspaceRouter.get('/prefs', (_req, res) => {
   const store = queryBootstrapStore();
-  res.json({ prefs: store.prefs, ws: store.data.ws, statuses: store.data.statuses });
+  res.json({
+    prefs: store.prefs,
+    ws: store.data.ws,
+    statuses: store.data.statuses,
+    projectStatuses: store.data.projectStatuses,
+  });
 });
 
 workspaceRouter.patch('/prefs', (req, res) => {
@@ -106,8 +111,8 @@ workspaceRouter.patch('/prefs', (req, res) => {
 });
 
 workspaceRouter.patch('/workspace', (req, res) => {
-  const { ws, workspaces, statuses, updatedAt } = patchWorkspaceSql(req.body || {});
-  res.json({ ok: true, ws, workspaces, statuses, updatedAt });
+  const { ws, workspaces, statuses, projectStatuses, updatedAt } = patchWorkspaceSql(req.body || {});
+  res.json({ ok: true, ws, workspaces, statuses, projectStatuses, updatedAt });
 });
 
 // SMTP Configuration

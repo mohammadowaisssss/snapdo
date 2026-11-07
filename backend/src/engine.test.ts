@@ -822,10 +822,10 @@ test('Modular Backend (Port 5000), Frontend (Port 4000, Nginx Reverse Proxy), Po
   assert.ok(frontendNginxConf.includes('application/javascript') || frontendNginxConf.includes('text/javascript'));
   assert.ok(frontendNginxConf.includes('proxy_pass http://backend:5000/api/;'));
 
-  // 3. Verify root docker-compose.yaml (PostgreSQL + MinIO + persistent backend volume) & .env.example
-  const composePath = fs.existsSync(path.join(root, 'docker-compose.yaml')) ? path.join(root, 'docker-compose.yaml') : path.join(root, 'docker-compose.yml');
-  assert.ok(fs.existsSync(composePath), 'Missing docker-compose.yaml or docker-compose.yml');
-  const composeFile = fs.readFileSync(composePath, 'utf8');
+  // 3. Verify single root docker-compose.yml (PostgreSQL + MinIO + persistent backend volume) & .env.example
+  assert.equal(fs.existsSync(path.join(root, 'docker-compose.yaml')), false, 'Only a single docker-compose file (docker-compose.yml) must exist, not 2');
+  assert.ok(fs.existsSync(path.join(root, 'docker-compose.yml')), 'Missing docker-compose.yml');
+  const composeFile = fs.readFileSync(path.join(root, 'docker-compose.yml'), 'utf8');
   assert.ok(composeFile.includes('image: postgres:16-alpine'));
   assert.ok(composeFile.includes('image: minio/minio:latest'));
   assert.ok(composeFile.includes('snapsec_pgdata:/var/lib/postgresql/data'));
@@ -835,11 +835,13 @@ test('Modular Backend (Port 5000), Frontend (Port 4000, Nginx Reverse Proxy), Po
   assert.ok(composeFile.includes('context: ./frontend'));
   assert.ok(composeFile.includes('5000}:5000"') || composeFile.includes('"5000:5000"'));
   assert.ok(composeFile.includes('4000}:4000"') || composeFile.includes('"4000:4000"'));
+  assert.ok(composeFile.includes('AUTHORIZED_DOMAINS'));
   assert.equal(backendPkg.dependencies['better-sqlite3'], undefined, 'better-sqlite3 must not be in backend/package.json');
 
   const envExample = fs.readFileSync(path.join(root, '.env.example'), 'utf8');
   assert.ok(envExample.includes('FRONTEND_PORT=4000'));
   assert.ok(envExample.includes('BACKEND_PORT=5000'));
+  assert.ok(envExample.includes('AUTHORIZED_DOMAINS=snapsec.co'), 'AUTHORIZED_DOMAINS must be present in .env.example');
   assert.ok(envExample.includes('PGHOST=db'));
   assert.ok(envExample.includes('PGDATABASE=snapsec_tasktracker'));
   assert.ok(envExample.includes('MINIO_ENDPOINT=minio'));
@@ -1414,6 +1416,51 @@ test('SMTP configuration resolution and mailer utilization for verification & pa
     server.close();
   }
 });
+
+test('AUTHORIZED_DOMAINS, tasks without projects, and custom project statuses work seamlessly', async () => {
+  const { getAuthorizedDomains, isAuthorizedRegistrationDomain } = await import('./services/engine.ts');
+  const { insertTaskSql, queryTasksSql, patchWorkspaceSql, queryBootstrapStore } = await import('./db/repository.ts');
+
+  // 1. Test AUTHORIZED_DOMAINS helper
+  assert.deepEqual(getAuthorizedDomains(['snapsec.co', 'partner.io']), ['snapsec.co', 'partner.io']);
+  assert.equal(isAuthorizedRegistrationDomain('owais@snapsec.co', ['snapsec.co', 'partner.io']), true);
+  assert.equal(isAuthorizedRegistrationDomain('alex@partner.io', ['snapsec.co', 'partner.io']), true);
+  assert.equal(isAuthorizedRegistrationDomain('sub@corp.snapsec.co', ['snapsec.co']), true);
+  assert.equal(isAuthorizedRegistrationDomain('attacker@gmail.com', ['snapsec.co', 'partner.io']), false);
+
+  // 2. Test task creation without any project (e.g. My Tasks when no project exists)
+  const taskNoProj = insertTaskSql({
+    title: 'Personal action item without project',
+    project: '',
+    status: 'todo',
+    priority: 'high',
+  });
+  assert.ok(taskNoProj.task);
+  assert.equal(taskNoProj.task.title, 'Personal action item without project');
+  assert.equal(taskNoProj.task.project, '');
+  assert.ok(taskNoProj.task.key.startsWith('TASK-') || taskNoProj.task.key.length > 0);
+
+  // Verify the task without project is found in queryTasksSql
+  const allTasks = queryTasksSql({});
+  assert.ok(allTasks.some((t: any) => t.id === taskNoProj.task.id && t.project === ''));
+
+  // 3. Test custom project statuses in workspace settings
+  const customProjectStatuses = [
+    { id: 'discovery', name: 'Discovery', c: '#8662C9', kind: 'planning' },
+    { id: 'active', name: 'In Progress', c: '#3B82C4', kind: 'active' },
+    { id: 'qa_review', name: 'Security QA', c: '#C48A1E', kind: 'hold' },
+    { id: 'complete', name: 'Shipped', c: '#3D8E5F', kind: 'complete' },
+  ];
+  const patchRes = patchWorkspaceSql({ projectStatuses: customProjectStatuses });
+  assert.ok(Array.isArray(patchRes.projectStatuses));
+  assert.equal(patchRes.projectStatuses.length, 4);
+  assert.ok(patchRes.projectStatuses.some((s: any) => s.id === 'qa_review' && s.name === 'Security QA'));
+
+  const store = queryBootstrapStore();
+  assert.ok(Array.isArray(store.data.projectStatuses));
+  assert.ok(store.data.projectStatuses.some((s: any) => s.id === 'qa_review' && s.name === 'Security QA'));
+});
+
 
 
 

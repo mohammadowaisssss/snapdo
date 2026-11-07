@@ -92,7 +92,7 @@ export function taskModal(m, H) {
       }
     </div>
     <div class="row" style="flex-wrap:wrap;gap:6px">
-      ${formChip('project', `<span class="pdot" style="--c:${pColor(p)}"></span>${esc(p?.name || 'Project')}`, 'Project')}
+      ${formChip('project', `<span class="pdot" style="--c:${p ? pColor(p) : '#9CA3AF'}"></span>${esc(p?.name || 'No project')}`, 'Project')}
       ${formChip('status', stPill(f.status), 'Status')}
       ${formChip('assignee', `${av(f.assignee, 'sm', false)}${esc(mem(f.assignee)?.name || 'Assignee')}`, 'Assignee')}
       ${formChip('priority', prPill(f.priority), 'Priority')}
@@ -245,51 +245,25 @@ export function shareModal(m, H) {
   </div>
   <div class="modal-f"><button class="btn btn-secondary" data-a="copyLink" data-pid="${p.id}">${ic('link', 14)}Copy link</button><span class="sp"></span><button class="btn btn-primary" data-a="closeModal">Done</button></div>`;
 }
-export function smtpConfigFormHtml() {
-  const cfg = D().smtpConfig || {};
-  const err = S.ui.errors?.smtp;
-  return `<div class="panel" style="padding:12px;background:var(--surface-2);border:1px solid var(--border-strong);border-radius:var(--r);display:flex;flex-direction:column;gap:10px">
-    <div class="row" style="justify-content:space-between">
-      <div style="font-size:12.5px;font-weight:600;display:flex;align-items:center;gap:6px">${ic('mail', 14)}Direct Gmail / SMTP Delivery Configuration</div>
-      <button type="button" class="ibtn ibtn-xs" data-a="toggleSmtpForm" aria-label="Close SMTP form">${ic('x', 13)}</button>
-    </div>
-    <div class="faint" style="font-size:11.5px;line-height:1.45">Enter a Gmail address + 16-character <a href="https://myaccount.google.com/apppasswords" target="_blank" rel="noopener noreferrer" class="link">Google App Password</a> (or custom SMTP credentials) to deliver invitation emails directly into external Gmail inboxes.</div>
-    <div class="row" style="gap:8px;flex-wrap:wrap">
-      <div class="field" style="flex:1;min-width:170px"><label class="label" for="smtp-user">Gmail / SMTP Username</label><input class="input" id="smtp-user" placeholder="you@gmail.com" value="${esc(cfg.user || getGoogleSenderEmail() || D().members.find(x => x.id === D().me)?.email || '')}"></div>
-      <div class="field" style="flex:1;min-width:170px"><label class="label" for="smtp-pass">Gmail App Password / SMTP Password</label><input class="input" id="smtp-pass" type="password" placeholder="xxxx xxxx xxxx xxxx" value="${esc(cfg.pass || '')}"></div>
-    </div>
-    <div class="row" style="gap:8px;flex-wrap:wrap">
-      <div class="field" style="flex:2;min-width:150px"><label class="label" for="smtp-host">SMTP Host</label><input class="input" id="smtp-host" placeholder="smtp.gmail.com" value="${esc(cfg.host || 'smtp.gmail.com')}"></div>
-      <div class="field" style="flex:1;min-width:90px"><label class="label" for="smtp-port">Port</label><input class="input" id="smtp-port" type="number" placeholder="465" value="${esc(cfg.port || 465)}"></div>
-    </div>
-    ${err ? `<div class="err">${ic('circle-alert', 12)}${esc(err)}</div>` : ''}
-    <div class="row" style="justify-content:flex-end;gap:8px">
-      <button type="button" class="btn btn-xs btn-secondary" data-a="toggleSmtpForm">Cancel</button>
-      <button type="button" class="btn btn-xs btn-primary" data-a="saveSmtpConfig" id="smtp-save-btn">${ic('check', 12)}Verify &amp; Save SMTP</button>
-    </div>
-  </div>`;
-}
 export function inviteModal(m, H) {
   const err = S.ui.errors.invite;
   const outbox = (D().outbox || []).slice(0, 3);
   const hasOAuth = !!getGmailAccessToken();
-  const smtpUser = D().smtpConfig?.user;
-  const senderEmail = getGoogleSenderEmail() || smtpUser || '';
+  const smtpConfigured = Boolean(D().smtpConfig?.user || D().smtpConfig?.host);
+  const senderEmail = getGoogleSenderEmail() || D().smtpConfig?.user || '';
   return `${H('Invite to ' + esc(D().ws.name), 'Invited people get an email with a direct link to join.')}
   <form class="modal-b" data-submit="submitInvite">
-    <div class="row" style="padding:8px 11px;border-radius:var(--r);border:1px solid ${hasOAuth || smtpUser ? 'color-mix(in srgb,var(--green) 38%,var(--border))' : 'var(--border)'};background:${hasOAuth || smtpUser ? 'color-mix(in srgb,var(--green) 8%,var(--surface))' : 'var(--surface-2)'};gap:8px;flex-wrap:wrap">
-      <span class="badge ${hasOAuth || smtpUser ? 'green' : 'amber'}"><span class="dot"></span>${hasOAuth ? 'Google Mail Connected' : smtpUser ? 'SMTP Active' : 'Direct Gmail Setup'}</span>
+    <div class="row" style="padding:8px 11px;border-radius:var(--r);border:1px solid ${hasOAuth || smtpConfigured ? 'color-mix(in srgb,var(--green) 38%,var(--border))' : 'var(--border)'};background:${hasOAuth || smtpConfigured ? 'color-mix(in srgb,var(--green) 8%,var(--surface))' : 'var(--surface-2)'};gap:8px;flex-wrap:wrap">
+      <span class="badge ${hasOAuth || smtpConfigured ? 'green' : 'amber'}"><span class="dot"></span>${hasOAuth ? 'Google Mail Connected' : smtpConfigured ? 'Environment SMTP Active' : 'System Email Ready'}</span>
       <span class="grow" style="font-size:12px;color:var(--text-2)">${
         hasOAuth
           ? `Sending directly from <b>${esc(senderEmail)}</b> via Gmail API`
-          : smtpUser
-            ? `Sending directly from <b>${esc(smtpUser)}</b> via ${esc(D().smtpConfig?.host || 'smtp.gmail.com')}`
-            : 'Connect Google Mail or SMTP so invites arrive directly in external Gmail inboxes.'
+          : smtpConfigured
+            ? `Sending via SMTP configured in environment (${esc(D().smtpConfig?.host || 'environment')})`
+            : 'Outbound emails deliver using the system SMTP settings configured in .env'
       }</span>
       <button type="button" class="btn btn-xs ${hasOAuth ? 'btn-secondary' : 'btn-primary'}" data-a="connectGmailOAuth">${ic('mail', 12)}${hasOAuth ? 'Reconnect Google' : 'Connect Google Mail'}</button>
-      <button type="button" class="btn btn-xs btn-secondary" data-a="toggleSmtpForm">${ic('settings', 12)}SMTP</button>
     </div>
-    ${S.ui.showSmtpForm ? smtpConfigFormHtml() : ''}
     <div class="field"><label class="label" for="inv-emails">Email addresses</label><textarea class="textarea ${err ? 'is-error' : ''}" id="inv-emails" placeholder="name@company.com, another@company.com" rows="3" autofocus>${esc(S.ui.inviteDraft || '')}</textarea>${err ? `<span class="err">${ic('circle-alert', 12)}${esc(err)}</span>` : '<span class="hint">Separate multiple addresses with commas.</span>'}</div>
     <div class="row" style="gap:12px"><div class="field grow"><label class="label" for="inv-role">Role</label><select class="select" id="inv-role">${['Member', 'Admin', 'Guest'].map(r => `<option>${r}</option>`).join('')}</select></div>
     <div class="field grow"><label class="label" for="inv-team">Team</label><select class="select" id="inv-team">${teamsList()
@@ -419,16 +393,14 @@ export function emailPreviewModal(m, H) {
             ${ic('mail', 16)}
             <div class="grow">
               <b>Deliver directly to ${esc(msg.to)}'s real Gmail inbox:</b>
-              <div style="font-size:12px;opacity:.92;margin-top:3px;line-height:1.45">Sandbox SMTP servers (Ethereal) only store test previews and cannot deliver to external Gmail addresses. Click <b>Deliver via My Google Account</b> below (or configure Gmail SMTP) to send this email directly into <b>${esc(msg.to)}</b>'s real Gmail inbox right now.</div>
+              <div style="font-size:12px;opacity:.92;margin-top:3px;line-height:1.45">Outbound invitation emails are delivered via the backend SMTP service configured in .env. Click <b>Deliver via My Google Account</b> below to send directly via Google API.</div>
               <div class="row" style="gap:8px;margin-top:9px;flex-wrap:wrap">
                 <button type="button" class="btn btn-xs btn-primary" data-a="deliverViaGoogleOAuth" data-id="${esc(msg.id)}" id="deliver-oauth-btn">${ic('send', 12)}Deliver Now via My Google Account</button>
-                <button type="button" class="btn btn-xs btn-secondary" data-a="toggleSmtpForm">${ic('settings', 12)}Configure Gmail App Password / SMTP</button>
                 ${safePreview ? `<a class="btn btn-xs btn-ghost" href="${esc(safePreview)}" target="_blank" rel="noopener noreferrer">${ic('external-link', 12)}Sandbox Preview</a>` : ''}
               </div>
             </div>
           </div>`
     }
-    ${S.ui.showSmtpForm ? smtpConfigFormHtml() : ''}
     <div style="border:1px solid var(--border);border-radius:var(--r-lg);overflow:hidden;background:#F9FAFB;padding:16px;max-height:320px;overflow-y:auto">
       <div style="font-size:12px;color:#4B5563;margin-bottom:12px;padding-bottom:10px;border-bottom:1px solid #E5E7EB">
         <div><b>From:</b> ${esc(msg.fromName)} &lt;${esc(msg.from)}&gt;</div>

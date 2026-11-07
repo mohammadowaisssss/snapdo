@@ -15,12 +15,15 @@ import {
 import { TODAY, addD, dOff, diffD, esc, fmtDate, iso, parse, uid } from '../utils/utils.js';
 import {
   DEFAULT_PREFS,
+  DEFAULT_PROJECT_STATUSES,
   EMAIL_REGEX,
   PROJECT_TEMPLATES,
   PersistedStore,
   RECUR_DAYS,
   createDefaultState,
   detectFileType,
+  getAuthorizedDomains,
+  isAuthorizedRegistrationDomain,
   isSnapsecCompanyEmail,
   makeProjectKey,
 } from '../services/engine.ts';
@@ -186,6 +189,7 @@ export function createCleanProductionState(): PersistedStore {
       me: 'm_shoaib',
       tfa: false,
       statuses: DEFAULT_STATUSES.map((s: any) => ({ ...s })),
+      projectStatuses: DEFAULT_PROJECT_STATUSES.map((s: any) => ({ ...s })),
       teams: TEAMS_SEED.map((t: any) => ({ ...t })),
       members: [
         {
@@ -951,6 +955,11 @@ export function queryBootstrapStore(): PersistedStore {
       : DEFAULT_STATUSES.map((s: any) => ({ ...s }));
   syncStatuses(statuses);
 
+  const projectStatuses =
+    Array.isArray(parsedPrefs.projectStatuses) && parsedPrefs.projectStatuses.length > 0
+      ? parsedPrefs.projectStatuses
+      : DEFAULT_PROJECT_STATUSES.map((s: any) => ({ ...s }));
+
   return {
     data: {
       ws: {
@@ -965,7 +974,9 @@ export function queryBootstrapStore(): PersistedStore {
       plan: wsRow.plan,
       me: wsRow.meMemberId,
       tfa: Boolean(wsRow.tfa),
+      authorizedDomains: getAuthorizedDomains(),
       statuses,
+      projectStatuses,
       teams: teamRows.map(tm => ({
         id: tm.id,
         name: tm.name,
@@ -1144,24 +1155,31 @@ export function insertTaskSql(rawInput: Record<string, any>) {
 
   let createdTaskId = '';
   const tx = conn.transaction(() => {
-    let projRow =
-      (input.project &&
-        pgDb.select().from(pgProjects).where(eq(pgProjects.id, String(input.project))).get()) ||
-      pgDb.select().from(pgProjects).where(eq(pgProjects.archived, false)).orderBy(asc(pgProjects.sortOrder)).get() ||
-      pgDb.select().from(pgProjects).get();
+    const explicitNoProject = input.project === '' || input.project === null;
+    let projRow = explicitNoProject
+      ? null
+      : (input.project &&
+          pgDb.select().from(pgProjects).where(eq(pgProjects.id, String(input.project))).get()) ||
+        pgDb.select().from(pgProjects).where(eq(pgProjects.archived, false)).orderBy(asc(pgProjects.sortOrder)).get() ||
+        pgDb.select().from(pgProjects).get();
 
-    if (!projRow) {
-      throw new Error('No project exists in workspace');
-    }
-
-    const nextSeq = (projRow.seq || 200) + 1;
-    let taskKey = typeof input.key === 'string' && input.key.trim() ? input.key.trim() : `${projRow.key}-${nextSeq}`;
-    if (!input.key) {
-      pgDb
-        .update(pgProjects)
-        .set({ seq: nextSeq })
-        .where(eq(pgProjects.id, projRow.id))
-        .run();
+    let projId = '';
+    let taskKey: string;
+    if (projRow) {
+      projId = projRow.id;
+      const nextSeq = (projRow.seq || 200) + 1;
+      taskKey = typeof input.key === 'string' && input.key.trim() ? input.key.trim() : `${projRow.key}-${nextSeq}`;
+      if (!input.key) {
+        pgDb
+          .update(pgProjects)
+          .set({ seq: nextSeq })
+          .where(eq(pgProjects.id, projRow.id))
+          .run();
+      }
+    } else {
+      const maxKeyRow = conn.prepare(`SELECT COUNT(*) as c FROM tasks`).get() as { c: number };
+      const seq = Number(maxKeyRow?.c || 0) + 101;
+      taskKey = typeof input.key === 'string' && input.key.trim() ? input.key.trim() : `TASK-${seq}`;
     }
 
     const maxOrderRow = conn.prepare(`SELECT COALESCE(MAX(sort_order), 0) AS maxO FROM tasks`).get() as {
@@ -1189,7 +1207,7 @@ export function insertTaskSql(rawInput: Record<string, any>) {
       .values({
         id,
         key: taskKey,
-        projectId: projRow.id,
+        projectId: projId,
         title: safeString(input.title, 500, 'Untitled') || 'Untitled',
         status: validStatus,
         assigneeId: typeof input.assignee === 'string' && input.assignee ? input.assignee : null,
@@ -1256,7 +1274,7 @@ export function insertTaskSql(rawInput: Record<string, any>) {
           size: safeString(att.size, 40, '24 KB') || '24 KB',
           authorId: safeString(att.by, 80) || meId,
           createdAt: typeof att.at === 'number' ? att.at : now,
-          projectId: projRow.id,
+          projectId: projId,
           taskId: id,
           commentId: att.commentId ? String(att.commentId) : null,
           dataUrl: minioInfo.dataUrl,
@@ -1269,7 +1287,7 @@ export function insertTaskSql(rawInput: Record<string, any>) {
           target: pgFiles.id,
           set: {
             taskId: id,
-            projectId: projRow.id,
+            projectId: projId,
             dataUrl: minioInfo.dataUrl,
             storageKey: minioInfo.storageKey,
             bucket: minioInfo.bucket,
@@ -1278,7 +1296,7 @@ export function insertTaskSql(rawInput: Record<string, any>) {
         .run();
     });
 
-    insertActivityRow(meId, 'created', id, projRow.id, '', now);
+    insertActivityRow(meId, 'created', id, projId || null, '', now);
     touchWorkspaceRow(now);
   });
 
@@ -1381,23 +1399,29 @@ export function patchTaskSql(taskId: string, rawPatch: Record<string, any>) {
           now,
         );
       } else if (k === 'project') {
-        const projRow = pgDb
-          .select()
-          .from(pgProjects)
-          .where(eq(pgProjects.id, String(newVal)))
-          .get();
-        if (projRow) {
-          const nextSeq = (projRow.seq || 200) + 1;
-          pgDb
-            .update(pgProjects)
-            .set({ seq: nextSeq })
-            .where(eq(pgProjects.id, projRow.id))
-            .run();
-          updateCols.projectId = projRow.id;
-          updateCols.key = `${projRow.key}-${nextSeq}`;
-          current.project = projRow.id;
-          current.key = updateCols.key;
-          insertActivityRow(meId, 'moved', taskId, projRow.id, `to ${projRow.name}`, now);
+        if (!newVal) {
+          updateCols.projectId = '';
+          current.project = '';
+          insertActivityRow(meId, 'moved', taskId, null, 'to No project', now);
+        } else {
+          const projRow = pgDb
+            .select()
+            .from(pgProjects)
+            .where(eq(pgProjects.id, String(newVal)))
+            .get();
+          if (projRow) {
+            const nextSeq = (projRow.seq || 200) + 1;
+            pgDb
+              .update(pgProjects)
+              .set({ seq: nextSeq })
+              .where(eq(pgProjects.id, projRow.id))
+              .run();
+            updateCols.projectId = projRow.id;
+            updateCols.key = `${projRow.key}-${nextSeq}`;
+            current.project = projRow.id;
+            current.key = updateCols.key;
+            insertActivityRow(meId, 'moved', taskId, projRow.id, `to ${projRow.name}`, now);
+          }
         }
       } else if (k === 'labels') {
         updateCols.labelsJson = JSON.stringify(Array.isArray(newVal) ? newVal : []);
@@ -3191,6 +3215,31 @@ export function patchWorkspaceSql(rawInput: Record<string, any>) {
     }
   }
 
+  let updatedProjectStatuses = Array.isArray(currentPrefs.projectStatuses) && currentPrefs.projectStatuses.length > 0
+    ? currentPrefs.projectStatuses
+    : DEFAULT_PROJECT_STATUSES.map((s: any) => ({ ...s }));
+
+  if (Array.isArray(input.projectStatuses) && input.projectStatuses.length > 0) {
+    const sanitizedProj = input.projectStatuses
+      .map((s: any) => {
+        if (!s || typeof s !== 'object') return null;
+        const name = safeString(s.name, 60).trim();
+        const rawId = safeString(s.id, 50)
+          .trim()
+          .toLowerCase()
+          .replace(/[^a-z0-9_-]+/g, '_');
+        if (!name || !rawId) return null;
+        const c = safeCssColor(s.c, '#3B82C4');
+        const kind = ['planning', 'active', 'risk', 'hold', 'complete'].includes(s.kind) ? s.kind : 'active';
+        return { id: rawId, name, c, kind };
+      })
+      .filter(Boolean);
+    if (sanitizedProj.length > 0) {
+      updatedProjectStatuses = sanitizedProj;
+      currentPrefs.projectStatuses = updatedProjectStatuses;
+    }
+  }
+
   const now = Date.now();
   pgDb
     .update(pgWorkspaces)
@@ -3210,6 +3259,7 @@ export function patchWorkspaceSql(rawInput: Record<string, any>) {
     ws: { name: newName, url: newUrl, c: newColor, brand: Boolean(wsRow.brand) },
     workspaces: workspacesList,
     statuses: updatedStatuses,
+    projectStatuses: updatedProjectStatuses,
     updatedAt: now,
   };
 }
@@ -3537,12 +3587,13 @@ export function signupUserSql(input: {
   const conn = getPgConnection();
   const email = String(input.email || '').trim().toLowerCase();
   const name = safeString(input.name, 120).trim();
-  if (!isSnapsecCompanyEmail(email)) {
+  if (!isAuthorizedRegistrationDomain(email)) {
+    const allowed = getAuthorizedDomains();
     return {
       ok: false as const,
       status: 403,
-      error: 'Only @snapsec.co company email addresses are allowed to sign up',
-      errors: { email: 'Only @snapsec.co company email addresses are allowed to sign up' },
+      error: `Only ${allowed.map(d => '@' + d).join(', ')} company email addresses are allowed to sign up`,
+      errors: { email: `Only ${allowed.map(d => '@' + d).join(', ')} company email addresses are allowed to sign up` },
     };
   }
   const pwHash = hashPassword(input.password);

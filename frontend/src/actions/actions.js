@@ -2,7 +2,7 @@
    ACTIONS · INPUT HANDLERS · DRAG & DROP · KEYBOARD · INIT
    ===================================================================== */
 import { $, $$, TODAY, addD, dOff, esc, fmtDate, iso, parse, uid } from '../core/utils.js';
-import { DEFAULT_STATUSES, PR, PSTAT, ST, STATUSES, syncStatuses } from '../core/constants.js';
+import { DEFAULT_PROJECT_STATUSES, DEFAULT_STATUSES, PR, PROJECT_STATUSES, PSTAT, ST, STATUSES, syncProjectStatuses, syncStatuses } from '../core/constants.js';
 import { ic } from '../core/icons.js';
 import { seed } from '../data/seed.js';
 import { api } from '../core/api.js';
@@ -137,15 +137,24 @@ A.undoCelebrateDone = el => {
 
 /* ---------- task mutations ---------- */
 export function nextKey(p) {
+  if (!p) {
+    D()._taskSeq = (D()._taskSeq || 100) + 1;
+    return `TASK-${D()._taskSeq}`;
+  }
   p.seq = (p.seq || 200) + 1;
   return p.key + '-' + p.seq;
 }
 export function createTask(f) {
-  const p = proj(f.project) || visibleProjects().find(canSee);
-  const maxO = Math.max(0, ...D().tasks.map(t => t.order));
+  const p =
+    f?.project === '' || f?.project === null
+      ? null
+      : f?.project
+        ? proj(f.project)
+        : visibleProjects().find(canSee);
+  const maxO = Math.max(0, ...D().tasks.map(t => t.order || 0));
   const t = Object.assign(
     {
-      project: p.id,
+      project: p ? p.id : (f?.project || ''),
       title: 'Untitled',
       status: 'todo',
       assignee: null,
@@ -165,7 +174,7 @@ export function createTask(f) {
       recur: null,
     },
     f,
-    { project: p.id },
+    { project: p ? p.id : (f?.project || '') },
   );
   t.id = f.id || uid('t');
   t.key = f.key || nextKey(p);
@@ -215,8 +224,12 @@ export function applyPatch(t, patch) {
     else if (k === 'start') logAct('changed start date of', t, nv ? `to ${fmtDate(nv)}` : '(cleared)');
     else if (k === 'project') {
       const p = proj(nv);
-      t.key = nextKey(p);
-      logAct('moved', t, `to ${p.name}`);
+      if (p) {
+        t.key = nextKey(p);
+        logAct('moved', t, `to ${p.name}`);
+      } else {
+        logAct('moved', t, 'to No project');
+      }
     } else if (k === 'labels') logAct('updated labels on', t);
     else if (k === 'title') logAct('renamed', t, `to “${nv}”`);
     else if (k === 'recur') logAct('set repeat on', t, nv ? nv.toLowerCase() : 'off');
@@ -676,16 +689,17 @@ A.editTask = el => {
 };
 A.newTask = el => {
   const d = el?.dataset || {};
+  const activeProj = visibleProjects().find(p => canSee(p) && p.status !== 'complete');
   const pid =
     d.project ||
     curProjectId() ||
     projectFromKey(S.ui.composer?.ctx) ||
     (S.ui.drawer && task(S.ui.drawer)?.project) ||
-    visibleProjects().find(p => canSee(p) && p.status !== 'complete')?.id;
+    activeProj?.id;
   S.ui.form = {
     title: '',
     desc: '',
-    project: canSee(proj(pid)) ? pid : 'p1',
+    project: pid && canSee(proj(pid)) ? pid : activeProj?.id || '',
     status: 'todo',
     assignee: d.assignee || D().me,
     priority: 'medium',
@@ -1034,7 +1048,8 @@ A.submitTask = () => {
   S.ui.modals.pop();
   fxSet({ added: t.id });
   render();
-  toast(`Created ${t.key} in ${proj(t.project).name}`, { action: 'Open', onAction: () => A.openTask({ dataset: { id: t.id } }) });
+  const prName = proj(t.project)?.name;
+  toast(`Created ${t.key}${prName ? ' in ' + prName : ''}`, { action: 'Open', onAction: () => A.openTask({ dataset: { id: t.id } }) });
 };
 
 /* inline composer */
@@ -1059,7 +1074,7 @@ A.commitComposer = () => {
     return;
   }
   const f = { title: v, ...c.gb };
-  f.project = f.project || projectFromKey(c.ctx) || curProjectId() || 'p1';
+  f.project = f.project || projectFromKey(c.ctx) || curProjectId() || visibleProjects().find(canSee)?.id || '';
   if (c.ctx === 'mytasks') f.assignee = D().me;
   mutate(() => createTask(f));
   setTimeout(() => $('#composer-in')?.focus(), 0);
@@ -3068,6 +3083,193 @@ A.resetDefaultStatuses = () => {
   toast('Default statuses restored');
 };
 
+/* ---------- Custom Workspace Project Statuses Management ---------- */
+function persistWorkspaceProjectStatuses() {
+  syncProjectStatuses(D().projectStatuses);
+  save();
+  api.updateWorkspace({ projectStatuses: D().projectStatuses }).catch(() => {});
+}
+
+A.setStatusesTab = el => {
+  S.ui.statusesTab = el.dataset.v || 'task';
+  render();
+};
+
+IN.newProjectStatusName = el => {
+  S.ui.newProjectStatusName = el.value;
+};
+IN.newProjectStatusKind = el => {
+  S.ui.newProjectStatusKind = el.value;
+};
+A.pickNewProjectStatusColor = el => {
+  const nameIn = $('#new-pst-name');
+  if (nameIn) S.ui.newProjectStatusName = nameIn.value;
+  S.ui.newProjectStatusColor = el.dataset.v || el.dataset.c;
+  render();
+};
+KEY.addProjectStatus = () => A.addProjectStatus();
+A.addProjectStatus = () => {
+  const nameIn = $('#new-pst-name');
+  const kindIn = $('#new-pst-kind');
+  const rawName = (nameIn ? nameIn.value : S.ui.newProjectStatusName || '').trim();
+  if (!rawName) {
+    toast('Enter a project status name', { kind: 'err' });
+    nameIn?.focus();
+    return;
+  }
+  D().projectStatuses = Array.isArray(D().projectStatuses) && D().projectStatuses.length
+    ? D().projectStatuses
+    : DEFAULT_PROJECT_STATUSES.map(s => ({ ...s }));
+  if (D().projectStatuses.some(s => s.name.toLowerCase() === rawName.toLowerCase())) {
+    toast(`Project status "${rawName}" already exists`, { kind: 'err' });
+    nameIn?.focus();
+    return;
+  }
+  const baseSlug = rawName
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '')
+    .slice(0, 24) || 'status';
+  let id = baseSlug;
+  let seq = 2;
+  while (D().projectStatuses.some(s => s.id === id)) {
+    id = `${baseSlug}_${seq++}`;
+  }
+  const kind = kindIn ? kindIn.value : S.ui.newProjectStatusKind || 'active';
+  const c = S.ui.newProjectStatusColor || '#3B82C4';
+  const newSt = { id, name: rawName, c, kind };
+  const completeIdx = D().projectStatuses.findIndex(s => s.id === 'complete' || s.kind === 'complete');
+  if (kind !== 'complete' && completeIdx === D().projectStatuses.length - 1 && completeIdx >= 0) {
+    D().projectStatuses.splice(completeIdx, 0, newSt);
+  } else {
+    D().projectStatuses.push(newSt);
+  }
+  S.ui.newProjectStatusName = '';
+  persistWorkspaceProjectStatuses();
+  render();
+  toast(`Created project status "${rawName}"`);
+};
+
+A.startEditProjectStatus = el => {
+  const id = el.dataset.id;
+  const st = (D().projectStatuses || PROJECT_STATUSES).find(s => s.id === id);
+  if (!st) return;
+  S.ui.editProjectStatusId = id;
+  S.ui.editProjectStatusName = st.name;
+  S.ui.editProjectStatusColor = st.c || '#3B82C4';
+  S.ui.editProjectStatusKind = st.kind || 'active';
+  render();
+  setTimeout(() => $('#edit-pst-name')?.focus(), 20);
+};
+A.cancelEditProjectStatus = () => {
+  S.ui.editProjectStatusId = null;
+  render();
+};
+IN.editProjectStatusKind = el => {
+  S.ui.editProjectStatusKind = el.value;
+};
+A.pickEditProjectStatusColor = el => {
+  const nameIn = $('#edit-pst-name');
+  if (nameIn) S.ui.editProjectStatusName = nameIn.value;
+  S.ui.editProjectStatusColor = el.dataset.v || el.dataset.c;
+  render();
+};
+KEY.saveEditProjectStatus = el => A.saveEditProjectStatus(el);
+A.saveEditProjectStatus = el => {
+  const id = el?.dataset?.id || S.ui.editProjectStatusId;
+  if (!id) return;
+  D().projectStatuses = Array.isArray(D().projectStatuses) && D().projectStatuses.length
+    ? D().projectStatuses
+    : DEFAULT_PROJECT_STATUSES.map(s => ({ ...s }));
+  const st = D().projectStatuses.find(s => s.id === id);
+  if (!st) return;
+  const nameIn = $('#edit-pst-name');
+  const kindIn = $('#edit-pst-kind');
+  const newName = (nameIn ? nameIn.value : S.ui.editProjectStatusName || st.name).trim();
+  if (!newName) {
+    toast("Project status name can't be empty", { kind: 'err' });
+    nameIn?.focus();
+    return;
+  }
+  if (D().projectStatuses.some(s => s.id !== id && s.name.toLowerCase() === newName.toLowerCase())) {
+    toast(`Another project status is already named "${newName}"`, { kind: 'err' });
+    nameIn?.focus();
+    return;
+  }
+  st.name = newName;
+  st.c = S.ui.editProjectStatusColor || st.c || '#3B82C4';
+  st.kind = kindIn ? kindIn.value : S.ui.editProjectStatusKind || st.kind || 'active';
+  S.ui.editProjectStatusId = null;
+  persistWorkspaceProjectStatuses();
+  render();
+  toast(`Updated project status "${newName}"`);
+};
+
+A.moveProjectStatus = el => {
+  const id = el.dataset.id;
+  const dir = +el.dataset.dir || 0;
+  D().projectStatuses = Array.isArray(D().projectStatuses) && D().projectStatuses.length
+    ? D().projectStatuses
+    : DEFAULT_PROJECT_STATUSES.map(s => ({ ...s }));
+  const idx = D().projectStatuses.findIndex(s => s.id === id);
+  const targetIdx = idx + dir;
+  if (idx < 0 || targetIdx < 0 || targetIdx >= D().projectStatuses.length) return;
+  const [item] = D().projectStatuses.splice(idx, 1);
+  D().projectStatuses.splice(targetIdx, 0, item);
+  persistWorkspaceProjectStatuses();
+  render();
+};
+
+A.deleteProjectStatus = el => {
+  const id = el.dataset.id;
+  D().projectStatuses = Array.isArray(D().projectStatuses) && D().projectStatuses.length
+    ? D().projectStatuses
+    : DEFAULT_PROJECT_STATUSES.map(s => ({ ...s }));
+  if (D().projectStatuses.length <= 1) {
+    toast('Workspace must have at least one project status', { kind: 'err' });
+    return;
+  }
+  const st = D().projectStatuses.find(s => s.id === id);
+  if (!st) return;
+  const fallback = D().projectStatuses.find(s => s.id !== id) || DEFAULT_PROJECT_STATUSES[0];
+  const affected = (D().projects || []).filter(p => p.status === id);
+  const doDelete = () => {
+    D().projectStatuses = D().projectStatuses.filter(s => s.id !== id);
+    affected.forEach(p => {
+      p.status = fallback.id;
+      api.updateProject(p.id, { status: fallback.id }).catch(() => {});
+    });
+    if (S.ui.editProjectStatusId === id) {
+      S.ui.editProjectStatusId = null;
+    }
+    persistWorkspaceProjectStatuses();
+    render();
+    toast(
+      affected.length
+        ? `Deleted "${st.name}" and moved ${affected.length} project${affected.length === 1 ? '' : 's'} to "${fallback.name}"`
+        : `Deleted project status "${st.name}"`,
+    );
+  };
+  if (affected.length > 0) {
+    confirmDlg({
+      title: `Delete project status "${st.name}"?`,
+      body: `<b>${affected.length} project${affected.length === 1 ? '' : 's'}</b> currently in <b>${esc(st.name)}</b> will be moved to <b>${esc(fallback.name)}</b>.`,
+      ok: 'Delete project status',
+      danger: true,
+      run: doDelete,
+    });
+  } else {
+    doDelete();
+  }
+};
+
+A.resetDefaultProjectStatuses = () => {
+  D().projectStatuses = DEFAULT_PROJECT_STATUSES.map(s => ({ ...s }));
+  persistWorkspaceProjectStatuses();
+  render();
+  toast('Reset project statuses to defaults');
+};
+
 A.delWorkspace = () =>
   confirmDlg({
     title: `Delete ${D().ws.name}?`,
@@ -3342,9 +3544,15 @@ A.doSignup = async () => {
     pw = $('#s-pw')?.value || '';
   S.ui.af.name = nm;
   S.ui.af.email = em;
-  if (!nm) e.name = 'Enter your name';
+  const allowedDomains = (D().authorizedDomains && D().authorizedDomains.length)
+    ? D().authorizedDomains
+    : ['snapsec.co'];
+  const domain = em.split('@')[1]?.toLowerCase();
+  const isAllowedDomain = domain && allowedDomains.some(d => domain === d || domain.endsWith('.' + d));
   if (!EMAIL_RE.test(em)) e.email = 'Enter a valid work email';
-  else if (!em.toLowerCase().endsWith('@snapsec.co')) e.email = 'Only @snapsec.co company email addresses are allowed to sign up';
+  else if (!isAllowedDomain) {
+    e.email = `Only ${allowedDomains.map(d => '@' + d).join(', ')} company email addresses are allowed to sign up`;
+  }
   if (pw.length < 10 || !/[0-9\W]/.test(pw)) e.pw = 'Use at least 10 characters, including a number or symbol';
   if (Object.keys(e).length) {
     render();

@@ -17,7 +17,7 @@ import {
   verifySessionTokenSql,
 } from '../db/repository.ts';
 import { rateLimit } from '../middleware/rateLimit.ts';
-import { validateAuthCredentials } from '../services/engine.ts';
+import { getAuthorizedDomains, validateAuthCredentials } from '../services/engine.ts';
 import { dispatchOutboxEmail } from '../services/mailer.ts';
 import { verifyAuthToken } from '../services/token.ts';
 import { sanitizeBaseUrl } from '../utils/security.ts';
@@ -46,6 +46,14 @@ authRouter.get('/auth/me', (req, res) => {
     prefs: check.prefs,
     token,
     expiresAt: check.expiresAt,
+  });
+});
+
+authRouter.get('/auth/config', (_req, res) => {
+  res.json({
+    ok: true,
+    authorizedDomains: getAuthorizedDomains(),
+    smtpConfigured: Boolean(process.env.SMTP_HOST && process.env.SMTP_USER),
   });
 });
 

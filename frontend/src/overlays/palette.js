@@ -83,7 +83,7 @@ export function paletteItems() {
         items: recent.map(t => ({
           html: stIcon(t.status),
           name: t.title,
-          sub: proj(t.project).name,
+          sub: proj(t.project)?.name || 'No project',
           r: t.key,
           run: () => A.openTask({ dataset: { id: t.id } }),
         })),
@@ -132,7 +132,7 @@ export function paletteItems() {
       name: 'Tasks',
       items: r.tasks
         .slice(0, lim)
-        .map(t => ({ html: stIcon(t.status), name: t.title, sub: proj(t.project).name, r: t.key, run: () => A.openTask({ dataset: { id: t.id } }) })),
+        .map(t => ({ html: stIcon(t.status), name: t.title, sub: proj(t.project)?.name || 'No project', r: t.key, run: () => A.openTask({ dataset: { id: t.id } }) })),
     });
   if (sc === 'all' || sc === 'projects')
     groups.push({
@@ -155,7 +155,7 @@ export function paletteItems() {
       items: r.files.slice(0, lim).map(f => ({
         icon: FT[f.type].i,
         name: f.name,
-        sub: proj(f.project).name,
+        sub: proj(f.project)?.name || 'No project',
         r: f.size,
         run: () => openModal({ type: 'filePreview', file: f, tid: f.task }),
       })),

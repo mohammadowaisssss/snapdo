@@ -3,7 +3,7 @@
    ===================================================================== */
 import { dOff, esc, fmtDate } from '../core/utils.js';
 import { ic, wsLogo } from '../core/icons.js';
-import { STATUSES } from '../core/constants.js';
+import { PROJECT_STATUSES, STATUSES } from '../core/constants.js';
 import { D, S, allTasks, me } from '../core/store.js';
 import { av, pIcon, stIcon } from '../ui/helpers.js';
 import { permsTable, teamsGrid } from './members.js';
@@ -31,14 +31,108 @@ export const STATUS_KINDS = [
   ['done', 'Done (Checkmark)'],
 ];
 
+export const PROJECT_STATUS_KINDS = [
+  ['planning', 'Planning / Spec'],
+  ['active', 'In Progress / Active'],
+  ['risk', 'At Risk / Needs Attention'],
+  ['hold', 'On Hold / Paused'],
+  ['complete', 'Completed / Released'],
+];
+
 export function renderStatusesSection() {
+  const tab = S.ui.statusesTab || 'task';
   const sts = STATUSES;
+  const psts = PROJECT_STATUSES;
   const newColor = S.ui.newStatusColor || '#5A67D8';
   const newKind = S.ui.newStatusKind || 'progress';
   const editId = S.ui.editStatusId || null;
   const err = S.ui.errors?.status || '';
 
+  const newPColor = S.ui.newProjectStatusColor || '#3B82C4';
+  const newPKind = S.ui.newProjectStatusKind || 'active';
+  const editPId = S.ui.editProjectStatusId || null;
+  const perr = S.ui.errors?.pstatus || '';
+
+  const tabSwitcher = `<div class="seg" role="tablist" style="margin-bottom:16px" aria-label="Status category">
+    <button class="${tab === 'task' ? 'on' : ''}" data-a="setStatusesTab" data-v="task">${ic('circle-check', 13)}Task Statuses (${sts.length})</button>
+    <button class="${tab === 'project' ? 'on' : ''}" data-a="setStatusesTab" data-v="project">${ic('folder-kanban', 13)}Project Statuses (${psts.length})</button>
+  </div>`;
+
+  if (tab === 'project') {
+    return `<div class="sblock" id="workspace-statuses-section">
+      ${tabSwitcher}
+      <div class="row" style="justify-content:space-between;align-items:flex-start;margin-bottom:12px;flex-wrap:wrap;gap:8px">
+        <div>
+          <h2 style="margin:0">Project statuses</h2>
+          <div class="muted" style="font-size:13px;margin-top:2px">Configure workflow stages, indicators, and labels for projects in this workspace.</div>
+        </div>
+        <button type="button" class="btn btn-ghost btn-sm" data-a="resetDefaultProjectStatuses">${ic('rotate-ccw', 13)}Restore defaults</button>
+      </div>
+      ${perr ? `<div class="alert danger" role="alert" style="margin-bottom:12px">${ic('circle-alert', 15)}<span>${esc(perr)}</span></div>` : ''}
+      <div class="panel" style="overflow:hidden;margin-bottom:14px" data-testid="project-statuses-list">
+        ${psts
+          .map((s, idx) => {
+            const count = (D().projects || []).filter(p => p.status === s.id).length;
+            const isEditing = editPId === s.id;
+            const editColor = S.ui.editProjectStatusColor || s.c || '#3B82C4';
+            const editKind = S.ui.editProjectStatusKind || s.kind || 'active';
+            if (isEditing) {
+              return `<div class="srow" style="padding:12px 14px;background:var(--surface-2);gap:12px;flex-wrap:wrap" data-pstatus-row="${esc(s.id)}">
+                <div class="col grow" style="gap:10px;min-width:240px">
+                  <div class="row" style="gap:8px;flex-wrap:wrap">
+                    <input class="input" id="edit-pst-name" value="${esc(S.ui.editProjectStatusName ?? s.name)}" placeholder="Project status name" style="max-width:220px" aria-label="Edit project status name">
+                    <select class="select" id="edit-pst-kind" data-in="editProjectStatusKind" style="width:auto;min-width:180px" aria-label="Project stage style">
+                      ${PROJECT_STATUS_KINDS.map(([k, label]) => `<option value="${k}" ${editKind === k ? 'selected' : ''}>${label}</option>`).join('')}
+                    </select>
+                  </div>
+                  <div class="row" style="gap:8px;align-items:center">
+                    <span class="faint" style="font-size:12px">Color:</span>
+                    <div class="swatches">
+                      ${STATUS_COLORS.map(c => `<button type="button" class="sw ${editColor === c ? 'on' : ''}" style="--c:${c};width:20px;height:20px" data-a="pickEditProjectStatusColor" data-v="${c}" aria-label="Color ${c}"></button>`).join('')}
+                    </div>
+                  </div>
+                </div>
+                <div class="row" style="gap:6px">
+                  <button type="button" class="btn btn-primary btn-sm" data-a="saveEditProjectStatus" data-id="${esc(s.id)}">Save</button>
+                  <button type="button" class="btn btn-ghost btn-sm" data-a="cancelEditProjectStatus">Cancel</button>
+                </div>
+              </div>`;
+            }
+            return `<div class="srow" style="padding:10px 14px;gap:12px" data-pstatus-row="${esc(s.id)}">
+              <div class="row grow" style="gap:10px;min-width:0">
+                <span class="pdot" style="--c:${s.c};width:10px;height:10px;border-radius:50%"></span>
+                <span style="font-weight:500" class="trunc">${esc(s.name)}</span>
+                <span class="mono faint" style="font-size:11.5px;background:var(--surface-2);padding:1px 6px;border-radius:4px">${esc(s.id)}</span>
+                <span class="badge" style="margin-left:4px">${count} project${count === 1 ? '' : 's'}</span>
+              </div>
+              <div class="row" style="gap:4px">
+                <button type="button" class="ibtn ibtn-xs" data-a="moveProjectStatus" data-id="${esc(s.id)}" data-dir="-1" ${idx === 0 ? 'disabled' : ''} data-tip="Move up" aria-label="Move ${esc(s.name)} up">${ic('arrow-up', 13)}</button>
+                <button type="button" class="ibtn ibtn-xs" data-a="moveProjectStatus" data-id="${esc(s.id)}" data-dir="1" ${idx === psts.length - 1 ? 'disabled' : ''} data-tip="Move down" aria-label="Move ${esc(s.name)} down">${ic('arrow-down', 13)}</button>
+                <button type="button" class="btn btn-ghost btn-sm" data-a="startEditProjectStatus" data-id="${esc(s.id)}" aria-label="Edit ${esc(s.name)}">${ic('pencil', 13)}Edit</button>
+                <button type="button" class="btn btn-danger-ghost btn-sm" data-a="deleteProjectStatus" data-id="${esc(s.id)}" ${psts.length <= 1 ? 'disabled' : ''} aria-label="Delete ${esc(s.name)}">${ic('trash-2', 13)}Delete</button>
+              </div>
+            </div>`;
+          })
+          .join('')}
+      </div>
+      <form class="panel" style="padding:14px" data-submit="addProjectStatus" novalidate>
+        <div class="label" style="margin-bottom:8px">Create new project status</div>
+        <div class="row" style="gap:10px;flex-wrap:wrap;align-items:center">
+          <input class="input" id="new-pst-name" value="${esc(S.ui.newProjectStatusName || '')}" data-in="newProjectStatusName" placeholder="Status name (e.g. Discovery, QA Testing)" style="max-width:240px" aria-label="New project status name">
+          <select class="select" id="new-pst-kind" data-in="newProjectStatusKind" style="width:auto;min-width:180px" aria-label="New project status category">
+            ${PROJECT_STATUS_KINDS.map(([k, label]) => `<option value="${k}" ${newPKind === k ? 'selected' : ''}>${label}</option>`).join('')}
+          </select>
+          <div class="swatches" role="radiogroup" aria-label="New project status color">
+            ${STATUS_COLORS.map(c => `<button type="button" class="sw ${newPColor === c ? 'on' : ''}" style="--c:${c};width:20px;height:20px" data-a="pickNewProjectStatusColor" data-v="${c}" aria-label="Color ${c}"></button>`).join('')}
+          </div>
+          <button type="submit" class="btn btn-primary btn-sm" data-a="addProjectStatus" id="add-pstatus-btn">${ic('plus', 14)}Add project status</button>
+        </div>
+      </form>
+    </div>`;
+  }
+
   return `<div class="sblock" id="workspace-statuses-section">
+    ${tabSwitcher}
     <div class="row" style="justify-content:space-between;align-items:flex-start;margin-bottom:12px;flex-wrap:wrap;gap:8px">
       <div>
         <h2 style="margin:0">Task statuses</h2>

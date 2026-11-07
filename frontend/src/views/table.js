@@ -46,7 +46,7 @@ export function tcell(t, c) {
     case 'created':
       return `<td class="num muted">${fmtDate(iso(new Date(t.created)))}</td>`;
     case 'project':
-      return `<td class="cellbtn" data-a="pop" data-pop="project" data-id="${t.id}"><span class="row" style="gap:6px"><span class="pdot" style="--c:${pColor(proj(t.project))}"></span><span class="trunc">${esc(proj(t.project).name)}</span></span></td>`;
+      return `<td class="cellbtn" data-a="pop" data-pop="project" data-id="${t.id}"><span class="row" style="gap:6px"><span class="pdot" style="--c:${pColor(proj(t.project))}"></span><span class="trunc">${esc(proj(t.project)?.name || 'No project')}</span></span></td>`;
   }
 }
 export function tableHtml(ts, key, p) {

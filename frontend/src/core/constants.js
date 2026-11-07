@@ -60,13 +60,48 @@ export const LABELS = [
   { id: 'growth', name: 'Growth', c: 'var(--orange)' },
 ];
 export const LB = Object.fromEntries(LABELS.map(l => [l.id, l]));
-export const PSTAT = {
-  planning: { name: 'Planning', c: 'var(--gray)' },
-  active: { name: 'In Progress', c: 'var(--blue)' },
-  risk: { name: 'At Risk', c: 'var(--red)' },
-  hold: { name: 'On Hold', c: 'var(--amber)' },
-  complete: { name: 'Completed', c: 'var(--green)' },
-};
+export const DEFAULT_PROJECT_STATUSES = [
+  { id: 'planning', name: 'Planning', c: '#6B7280', kind: 'planning' },
+  { id: 'active', name: 'In Progress', c: '#3B82C4', kind: 'active' },
+  { id: 'risk', name: 'At Risk', c: '#E05252', kind: 'risk' },
+  { id: 'hold', name: 'On Hold', c: '#C48A1E', kind: 'hold' },
+  { id: 'complete', name: 'Completed', c: '#3D8E5F', kind: 'complete' },
+];
+export const PROJECT_STATUSES = DEFAULT_PROJECT_STATUSES.map(s => ({ ...s }));
+const _PSTAT = Object.fromEntries(PROJECT_STATUSES.map(s => [s.id, s]));
+export const PSTAT = new Proxy(_PSTAT, {
+  get(target, prop) {
+    if (typeof prop !== 'string') return target[prop];
+    return (
+      target[prop] || {
+        id: prop,
+        name: prop.replace(/[_-]+/g, ' ').replace(/\b\w/g, c => c.toUpperCase()),
+        c: '#6B7280',
+        kind: prop === 'complete' ? 'complete' : 'active',
+      }
+    );
+  },
+});
+export function syncProjectStatuses(customList) {
+  const source = Array.isArray(customList) && customList.length > 0 ? customList : DEFAULT_PROJECT_STATUSES;
+  const normalized = source
+    .filter(s => s && typeof s.id === 'string' && s.id.trim() && typeof s.name === 'string' && s.name.trim())
+    .map(s => {
+      const id = String(s.id).trim();
+      const def = DEFAULT_PROJECT_STATUSES.find(d => d.id === id);
+      return {
+        id,
+        name: String(s.name).trim(),
+        c: String(s.c || def?.c || '#3B82C4').trim(),
+        kind: String(s.kind || def?.kind || (id === 'complete' ? 'complete' : 'active')).trim(),
+      };
+    });
+  const next = normalized.length > 0 ? normalized : DEFAULT_PROJECT_STATUSES.map(s => ({ ...s }));
+  PROJECT_STATUSES.splice(0, PROJECT_STATUSES.length, ...next);
+  for (const k of Object.keys(_PSTAT)) delete _PSTAT[k];
+  for (const s of PROJECT_STATUSES) _PSTAT[s.id] = s;
+  return PROJECT_STATUSES;
+}
 export const PCOLORS = {
   indigo: '#5A67D8',
   blue: '#3B82C4',

@@ -35,7 +35,7 @@ export function cellLabels(t) {
 }
 export function cellProject(t) {
   const p = proj(t.project);
-  return `<button class="pillbtn" data-a="pop" data-pop="project" data-id="${t.id}" aria-label="Project"><span class="pdot" style="--c:${pColor(p)}"></span><span class="trunc">${esc(p?.name)}</span></button>`;
+  return `<button class="pillbtn ${p ? '' : 'empty'}" data-a="pop" data-pop="project" data-id="${t.id}" aria-label="Project"><span class="pdot" style="--c:${pColor(p)}"></span><span class="trunc">${esc(p?.name || 'No project')}</span></button>`;
 }
 export const CELL = { status: cellStatus, assignee: cellAssignee, priority: cellPrio, due: cellDue, labels: cellLabels, project: cellProject };
 
@@ -139,7 +139,7 @@ export function miniRow(t, opt = {}) {
     <input type="checkbox" class="check round" ${t.status === 'done' ? 'checked' : ''} data-a="toggleDone" data-id="${t.id}" aria-label="Complete ${esc(t.title)}">
     <span data-tip="${ST[t.status].name}">${stIcon(t.status)}</span>
     <span class="tt">${esc(t.title)}</span>
-    ${opt.noProj ? '' : `<span class="pj hide-m"><span class="pdot" style="--c:${pColor(p)}"></span><span class="trunc">${esc(p.name)}</span></span>`}
+    ${opt.noProj ? '' : `<span class="pj hide-m"><span class="pdot" style="--c:${pColor(p)}"></span><span class="trunc">${esc(p?.name || 'No project')}</span></span>`}
     <span data-tip="${PR[t.priority].name} priority">${prIcon(t.priority)}</span>
     <span style="width:74px;text-align:right" class="hide-m">${dueHtml(t, false)}</span>
     ${opt.av === false ? '' : av(t.assignee, 'sm')}

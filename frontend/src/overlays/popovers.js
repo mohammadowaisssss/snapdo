@@ -1,7 +1,7 @@
 /* ---------------- POPOVERS ---------------- */
 import { $, MOD, MONL, TODAY, WD, addD, dOff, diffD, esc, fmtDate, iso, parse } from '../core/utils.js';
 import { ic, wsLogo } from '../core/icons.js';
-import { LABELS, PRIOS, PSTAT, STATUSES } from '../core/constants.js';
+import { LABELS, PRIOS, PROJECT_STATUSES, PSTAT, STATUSES } from '../core/constants.js';
 import { D, S, allTasks, canSee, me, mem, pColor, proj, task, visibleProjects } from '../core/store.js';
 import { av, avStack, prIcon, stIcon } from '../ui/helpers.js';
 import { focusKey, render } from '../shell/render.js';
@@ -144,14 +144,15 @@ export function popHtml(p) {
         { search: 'Filter labels…' },
       );
       break;
-    case 'project':
-      inner = popList(
-        visibleProjects()
-          .filter(q => canSee(q) && q.status !== 'complete')
-          .map(q => ({ id: q.id, name: q.name, html: `<span class="pdot" style="--c:${pColor(q)}"></span>`, on: t?.project === q.id })),
-        { search: 'Move to project…' },
-      );
+    case 'project': {
+      const projs = visibleProjects().filter(q => canSee(q) && q.status !== 'complete');
+      const items = [
+        { id: '', name: 'No project', html: `<span class="pdot" style="--c:#9CA3AF"></span>`, on: !t?.project },
+        ...projs.map(q => ({ id: q.id, name: q.name, html: `<span class="pdot" style="--c:${pColor(q)}"></span>`, on: t?.project === q.id })),
+      ];
+      inner = popList(items, { search: 'Select project…' });
       break;
+    }
     case 'recur':
       inner = popList(
         ['Does not repeat', 'Daily', 'Weekly', 'Every 2 weeks', 'Monthly'].map(x => ({
@@ -192,11 +193,11 @@ export function popHtml(p) {
     case 'pstatus': {
       const pr = proj(p.id);
       inner = popList(
-        Object.entries(PSTAT).map(([k, v]) => ({
-          id: k,
-          name: v.name,
-          html: `<span class="pdot" style="--c:${v.c};border-radius:50%"></span>`,
-          on: pr.status === k,
+        PROJECT_STATUSES.map(s => ({
+          id: s.id,
+          name: s.name,
+          html: `<span class="pdot" style="--c:${s.c};border-radius:50%"></span>`,
+          on: pr?.status === s.id,
         })),
       );
       break;

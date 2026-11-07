@@ -22,7 +22,7 @@ export function pageArchive() {
               return row(
                 stIcon(t.status, 15),
                 esc(t.title),
-                `<span class="mono">${t.key}</span> · ${esc(p.name)}`,
+                `<span class="mono">${t.key}</span> · ${esc(p?.name || 'No project')}`,
                 t.archivedAt ? 'Archived ' + ago(t.archivedAt) : 'Archived',
                 'restoreTask',
                 'purgeTask',

@@ -157,7 +157,7 @@ CREATE INDEX IF NOT EXISTS idx_pg_projects_status ON projects(status);
 CREATE TABLE IF NOT EXISTS tasks (
   id TEXT PRIMARY KEY,
   key TEXT NOT NULL,
-  project_id TEXT NOT NULL,
+  project_id TEXT NOT NULL DEFAULT '',
   title TEXT NOT NULL,
   status TEXT NOT NULL DEFAULT 'todo',
   assignee_id TEXT,

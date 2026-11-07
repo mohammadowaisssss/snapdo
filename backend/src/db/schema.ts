@@ -112,7 +112,7 @@ export const pgTasks = pgTable(
   {
     id: text('id').primaryKey(),
     key: text('key').notNull(),
-    projectId: text('project_id').notNull(),
+    projectId: text('project_id').notNull().default(''),
     title: text('title').notNull(),
     status: text('status').notNull().default('todo'),
     assigneeId: text('assignee_id'),

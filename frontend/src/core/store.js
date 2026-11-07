@@ -1,6 +1,14 @@
 /* ---------- store ---------- */
 import { TODAY, diffD, iso, parse, uid } from './utils.js';
-import { DEFAULT_STATUSES, PCOLORS, STATUSES, TEAMS_SEED, syncStatuses } from './constants.js';
+import {
+  DEFAULT_PROJECT_STATUSES,
+  DEFAULT_STATUSES,
+  PCOLORS,
+  STATUSES,
+  TEAMS_SEED,
+  syncProjectStatuses,
+  syncStatuses,
+} from './constants.js';
 import { isAuthenticated } from './auth.js';
 import { api } from './api.js';
 
@@ -119,11 +127,19 @@ if (!Array.isArray(S.data.statuses) || !S.data.statuses.length) {
 }
 syncStatuses(S.data.statuses);
 
+if (!Array.isArray(S.data.projectStatuses) || !S.data.projectStatuses.length) {
+  S.data.projectStatuses = DEFAULT_PROJECT_STATUSES.map(s => ({ ...s }));
+}
+syncProjectStatuses(S.data.projectStatuses);
+
 export let _saveT;
 export function save(syncPrefsOnly = false) {
   _localMutCount++;
   if (Array.isArray(S.data?.statuses) && S.data.statuses.length) {
     syncStatuses(S.data.statuses);
+  }
+  if (Array.isArray(S.data?.projectStatuses) && S.data.projectStatuses.length) {
+    syncProjectStatuses(S.data.projectStatuses);
   }
   if (!isAuthenticated()) return;
   const payload = { data: S.data, prefs: S.prefs, views: S.views, collapsed: S.ui.collapsed };
@@ -139,6 +155,17 @@ export function save(syncPrefsOnly = false) {
 
 export async function hydrateFromBackend(onHydrated) {
   if (!isAuthenticated()) {
+    try {
+      const r = await fetch('/api/auth/config');
+      if (r.ok) {
+        const cfg = await r.json();
+        if (Array.isArray(cfg?.authorizedDomains) && cfg.authorizedDomains.length) {
+          S.data.authorizedDomains = cfg.authorizedDomains;
+        }
+      }
+    } catch {
+      /* ignore */
+    }
     if (typeof onHydrated === 'function') onHydrated();
     return;
   }
@@ -150,6 +177,10 @@ export async function hydrateFromBackend(onHydrated) {
         S.data.statuses = DEFAULT_STATUSES.map(s => ({ ...s }));
       }
       syncStatuses(S.data.statuses);
+      if (!Array.isArray(S.data.projectStatuses) || !S.data.projectStatuses.length) {
+        S.data.projectStatuses = DEFAULT_PROJECT_STATUSES.map(s => ({ ...s }));
+      }
+      syncProjectStatuses(S.data.projectStatuses);
       S.prefs = Object.assign({}, DEFAULT_PREFS, remote.prefs || {});
       S.views = remote.views || {};
       S.ui.collapsed = !!remote.collapsed;

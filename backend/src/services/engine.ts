@@ -137,6 +137,14 @@ export interface PersistedStore {
   updatedAt: number;
 }
 
+export const DEFAULT_PROJECT_STATUSES = [
+  { id: 'planning', name: 'Planning', c: '#6B7280', kind: 'planning' },
+  { id: 'active', name: 'In Progress', c: '#3B82C4', kind: 'active' },
+  { id: 'risk', name: 'At Risk', c: '#E05252', kind: 'risk' },
+  { id: 'hold', name: 'On Hold', c: '#C48A1E', kind: 'hold' },
+  { id: 'complete', name: 'Completed', c: '#3D8E5F', kind: 'complete' },
+];
+
 export function createDefaultState(): PersistedStore {
   const data: any = seed();
   if (!data.teams) {
@@ -146,6 +154,9 @@ export function createDefaultState(): PersistedStore {
     data.statuses = DEFAULT_STATUSES.map((s: any) => ({ ...s }));
   }
   syncStatuses(data.statuses);
+  if (!Array.isArray(data.projectStatuses) || !data.projectStatuses.length) {
+    data.projectStatuses = DEFAULT_PROJECT_STATUSES.map((s: any) => ({ ...s }));
+  }
   return {
     data,
     prefs: { ...DEFAULT_PREFS },
@@ -1066,9 +1077,31 @@ export function deleteFileRecord(data: any, fileId: string) {
 /* ---------- Auth & Security Validation ---------- */
 export const SNAPSEC_EMAIL_DOMAIN = '@snapsec.co';
 
-export function isSnapsecCompanyEmail(email: string): boolean {
+export function getAuthorizedDomains(customDomains?: string[]): string[] {
+  if (customDomains && customDomains.length > 0) {
+    return customDomains.map(d => d.trim().toLowerCase().replace(/^@/, '')).filter(Boolean);
+  }
+  if (typeof process !== 'undefined' && process.env?.AUTHORIZED_DOMAINS) {
+    const parsed = process.env.AUTHORIZED_DOMAINS.split(',')
+      .map(d => d.trim().toLowerCase().replace(/^@/, ''))
+      .filter(Boolean);
+    if (parsed.length > 0) return parsed;
+  }
+  return ['snapsec.co'];
+}
+
+export function isAuthorizedRegistrationDomain(email: string, customDomains?: string[]): boolean {
   const clean = String(email || '').trim().toLowerCase();
-  return EMAIL_REGEX.test(clean) && clean.endsWith(SNAPSEC_EMAIL_DOMAIN);
+  if (!EMAIL_REGEX.test(clean)) return false;
+  const parts = clean.split('@');
+  if (parts.length !== 2) return false;
+  const domain = parts[1].toLowerCase();
+  const allowed = getAuthorizedDomains(customDomains);
+  return allowed.some(d => domain === d || domain.endsWith('.' + d));
+}
+
+export function isSnapsecCompanyEmail(email: string): boolean {
+  return isAuthorizedRegistrationDomain(email);
 }
 
 export function validateAuthCredentials(mode: 'login' | 'signup' | 'reset' | 'password', payload: Record<string, any>) {
@@ -1085,8 +1118,9 @@ export function validateAuthCredentials(mode: 'login' | 'signup' | 'reset' | 'pa
     const pw = String(payload.password ?? payload.pw ?? '');
     if (!name) errors.name = 'Enter your name';
     if (!EMAIL_REGEX.test(email)) errors.email = 'Enter a valid work email';
-    else if (!isSnapsecCompanyEmail(email)) {
-      errors.email = 'Only @snapsec.co company email addresses are allowed to sign up';
+    else if (!isAuthorizedRegistrationDomain(email)) {
+      const allowed = getAuthorizedDomains();
+      errors.email = `Only ${allowed.map(d => '@' + d).join(', ')} company email addresses are allowed to sign up`;
     }
     if (pw.length < 10 || !/[0-9\W]/.test(pw)) {
       errors.pw = 'Use at least 10 characters, including a number or symbol';
