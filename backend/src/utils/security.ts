@@ -67,6 +67,8 @@ export function safeImageSrc(url: unknown): string {
 export function safePdfSrc(url: unknown): string {
   if (typeof url !== 'string') return '';
   const trimmed = url.trim().replace(/[\u0000-\u001F\u007F]/g, '');
+  if (/^https?:\/\/[^\s"'<>]+$/i.test(trimmed)) return trimmed;
+  if (/^\/[^\s"'<>]*$/.test(trimmed) && !trimmed.startsWith('//')) return trimmed;
   if (/^data:application\/pdf;base64,[A-Za-z0-9+/=\s]+$/i.test(trimmed)) {
     return trimmed;
   }
@@ -74,13 +76,14 @@ export function safePdfSrc(url: unknown): string {
 }
 
 /**
- * Strictly validates download / attachment data URLs or http(s) URLs.
+ * Strictly validates download / attachment data URLs, MinIO object paths, or http(s) URLs.
  */
 export function safeDownloadUrl(url: unknown): string {
   if (typeof url !== 'string') return '';
   const trimmed = url.trim().replace(/[\u0000-\u001F\u007F]/g, '');
   if (!trimmed) return '';
   if (/^https?:\/\/[^\s"'<>]+$/i.test(trimmed)) return trimmed;
+  if (/^\/[^\s"'<>]*$/.test(trimmed) && !trimmed.startsWith('//')) return trimmed;
   if (/^blob:https?:\/\/[^\s"'<>]+$/i.test(trimmed)) return trimmed;
   // Allow safe base64 data URLs except text/html, image/svg+xml, application/javascript, text/javascript
   if (/^data:([a-z0-9!#$&-^_]+\/[a-z0-9!#$&-^_.+]+);base64,[A-Za-z0-9+/=\s]+$/i.test(trimmed)) {

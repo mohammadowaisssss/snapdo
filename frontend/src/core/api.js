@@ -114,6 +114,7 @@ export const api = {
     const qs = new URLSearchParams(params).toString();
     return request(`/api/files${qs ? `?${qs}` : ''}`);
   },
+  uploadMinioObject: body => request('/api/files/minio-upload', { method: 'POST', body }),
   uploadFile: body => request('/api/files', { method: 'POST', body }),
   renameFile: (id, name) => request(`/api/files/${encodeURIComponent(id)}`, { method: 'PATCH', body: { name } }),
   duplicateFile: id => request(`/api/files/${encodeURIComponent(id)}/duplicate`, { method: 'POST' }),

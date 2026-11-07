@@ -37,27 +37,36 @@ import {
   verifyPassword,
 } from '../services/token.ts';
 import {
+  MINIO_BUCKET,
+  deleteObjectFromMinio,
+  ensureAttachmentStoredInMinio,
+  ensureMinioBucket,
+  externalizeInlineImagesToMinio,
+} from '../services/minio.ts';
+import {
   DATA_DIR,
   createPgPool,
   ensurePgSchema,
-  getSqliteConnection,
+  flushToPostgresPool,
+  getPgConnection,
+  hydrateFromPostgresPool,
   isPostgresConfigured,
-  sqliteDb,
+  pgDb,
 } from './index.ts';
 import {
-  sqliteActivityLogs,
-  sqliteComments,
-  sqliteFiles,
-  sqliteMembers,
-  sqliteNotifications,
-  sqliteOutboxEmails,
-  sqliteProjects,
-  sqliteSavedViews,
-  sqliteSessions,
-  sqliteSubtasks,
-  sqliteTasks,
-  sqliteTeams,
-  sqliteWorkspaces,
+  pgActivityLogs,
+  pgComments,
+  pgFiles,
+  pgMembers,
+  pgNotifications,
+  pgOutboxEmails,
+  pgProjects,
+  pgSavedViews,
+  pgSessions,
+  pgSubtasks,
+  pgTasks,
+  pgTeams,
+  pgWorkspaces,
 } from './schema.ts';
 
 const ALLOWED_TASK_PATCH_KEYS = new Set([
@@ -124,7 +133,7 @@ function safeJsonParse<T>(raw: string | null | undefined, fallback: T): T {
 }
 
 function touchWorkspaceRow(now = Date.now()) {
-  const conn = getSqliteConnection();
+  const conn = getPgConnection();
   conn.prepare(`UPDATE workspaces SET updated_at = ? WHERE id = 'ws_main'`).run(now);
   return now;
 }
@@ -137,8 +146,8 @@ function insertActivityRow(
   extra = '',
   at = Date.now(),
 ) {
-  sqliteDb
-    .insert(sqliteActivityLogs)
+  pgDb
+    .insert(pgActivityLogs)
     .values({
       id: uid('a'),
       actorId: actorId || 'm1',
@@ -152,10 +161,10 @@ function insertActivityRow(
 }
 
 function getCurrentMeId(): string {
-  const row = sqliteDb
-    .select({ meMemberId: sqliteWorkspaces.meMemberId })
-    .from(sqliteWorkspaces)
-    .where(eq(sqliteWorkspaces.id, 'ws_main'))
+  const row = pgDb
+    .select({ meMemberId: pgWorkspaces.meMemberId })
+    .from(pgWorkspaces)
+    .where(eq(pgWorkspaces.id, 'ws_main'))
     .get();
   return row?.meMemberId || 'm1';
 }
@@ -217,7 +226,7 @@ export function createCleanProductionState(): PersistedStore {
  * Ensures the mandatory seed account (shoaib@snapsec.co) always exists with a default password and verified status.
  */
 export function ensureSeedAccountSql(): void {
-  const conn = getSqliteConnection();
+  const conn = getPgConnection();
   const existingSeed = conn
     .prepare(`SELECT id, password_hash, email_verified FROM members WHERE LOWER(email) = LOWER(?) LIMIT 1`)
     .get(DEFAULT_SEED_EMAIL) as { id: string; password_hash: string | null; email_verified: number } | undefined;
@@ -225,8 +234,8 @@ export function ensureSeedAccountSql(): void {
   if (!existingSeed) {
     const idExists = conn.prepare(`SELECT id FROM members WHERE id = 'm_shoaib' LIMIT 1`).get();
     const seedId = idExists ? uid('m') : 'm_shoaib';
-    sqliteDb
-      .insert(sqliteMembers)
+    pgDb
+      .insert(pgMembers)
       .values({
         id: seedId,
         name: DEFAULT_SEED_NAME,
@@ -256,7 +265,7 @@ export function ensureSeedAccountSql(): void {
  * Always keeps the seed account (shoaib@snapsec.co) present with its default password.
  */
 export function ensureRelationalDatabaseSeeded(): void {
-  const conn = getSqliteConnection();
+  const conn = getPgConnection();
   const isTest = isTestRuntime();
   const existing = conn.prepare(`SELECT id FROM workspaces WHERE id = 'ws_main' LIMIT 1`).get();
   if (existing) {
@@ -289,7 +298,7 @@ export function ensureRelationalDatabaseSeeded(): void {
  * Atomically populates all normalized relational tables inside a single ACID SQL transaction.
  */
 export function populateAllTablesTransaction(store: PersistedStore): number {
-  const conn = getSqliteConnection();
+  const conn = getPgConnection();
   const d = store.data || {};
   const now = Date.now();
 
@@ -317,8 +326,8 @@ export function populateAllTablesTransaction(store: PersistedStore): number {
     const prefs: Record<string, any> = { ...DEFAULT_PREFS, ...(store.prefs || {}), statuses };
     if (prefs.name === 'Tanjim Islam') prefs.name = 'Mohammad Owais';
 
-    sqliteDb
-      .insert(sqliteWorkspaces)
+    pgDb
+      .insert(pgWorkspaces)
       .values({
         id: 'ws_main',
         name: safeString(ws.name, 120, 'Snapsec') || 'Snapsec',
@@ -341,8 +350,8 @@ export function populateAllTablesTransaction(store: PersistedStore): number {
 
     const teams = Array.isArray(d.teams) && d.teams.length ? d.teams : TEAMS_SEED;
     for (const tm of teams) {
-      sqliteDb
-        .insert(sqliteTeams)
+      pgDb
+        .insert(pgTeams)
         .values({
           id: String(tm.id),
           name: String(tm.name || 'Team'),
@@ -355,8 +364,8 @@ export function populateAllTablesTransaction(store: PersistedStore): number {
 
     for (const m of d.members || []) {
       const isLegacyOwner = m.id === 'm1' && (m.name === 'Tanjim Islam' || m.email === 'hello@snapsec.com');
-      sqliteDb
-        .insert(sqliteMembers)
+      pgDb
+        .insert(pgMembers)
         .values({
           id: String(m.id),
           uid: m.uid ? String(m.uid) : null,
@@ -383,8 +392,8 @@ export function populateAllTablesTransaction(store: PersistedStore): number {
     const projOrder: string[] = Array.isArray(d.projOrder) ? d.projOrder : [];
     (d.projects || []).forEach((p: any, idx: number) => {
       const orderIdx = projOrder.indexOf(p.id);
-      sqliteDb
-        .insert(sqliteProjects)
+      pgDb
+        .insert(pgProjects)
         .values({
           id: String(p.id),
           key: String(p.key || 'PRJ'),
@@ -415,8 +424,9 @@ export function populateAllTablesTransaction(store: PersistedStore): number {
     const insertedFileIds = new Set<string>();
 
     for (const t of d.tasks || []) {
-      sqliteDb
-        .insert(sqliteTasks)
+      const normalizedDesc = externalizeInlineImagesToMinio(String(t.desc || ''), `tasks/${t.id}`);
+      pgDb
+        .insert(pgTasks)
         .values({
           id: String(t.id),
           key: String(t.key || 'TSK-1'),
@@ -429,7 +439,7 @@ export function populateAllTablesTransaction(store: PersistedStore): number {
           start: t.start ? String(t.start) : null,
           labelsJson: JSON.stringify(Array.isArray(t.labels) ? t.labels : []),
           depsJson: JSON.stringify(Array.isArray(t.deps) ? t.deps : []),
-          desc: String(t.desc || ''),
+          desc: normalizedDesc,
           estimate: t.estimate != null ? String(t.estimate) : null,
           createdAt: Number(t.created || now),
           updatedAt: Number(t.updated || now),
@@ -444,8 +454,8 @@ export function populateAllTablesTransaction(store: PersistedStore): number {
         .run();
 
       (t.subtasks || []).forEach((s: any, sIdx: number) => {
-        sqliteDb
-          .insert(sqliteSubtasks)
+        pgDb
+          .insert(pgSubtasks)
           .values({
             id: String(s.id || uid('s')),
             taskId: String(t.id),
@@ -463,8 +473,9 @@ export function populateAllTablesTransaction(store: PersistedStore): number {
         const fid = String(att.id || uid('f'));
         if (insertedFileIds.has(fid)) return;
         insertedFileIds.add(fid);
-        sqliteDb
-          .insert(sqliteFiles)
+        const minioInfo = ensureAttachmentStoredInMinio(att, `tasks/${t.id}`);
+        pgDb
+          .insert(pgFiles)
           .values({
             id: fid,
             name: String(att.name || 'attachment'),
@@ -475,23 +486,29 @@ export function populateAllTablesTransaction(store: PersistedStore): number {
             projectId: String(t.project || 'p1'),
             taskId: String(t.id),
             commentId: att.commentId ? String(att.commentId) : null,
-            dataUrl: att.dataUrl ? String(att.dataUrl) : null,
+            dataUrl: minioInfo.dataUrl,
+            storageKey: minioInfo.storageKey,
+            bucket: minioInfo.bucket,
             textContent: typeof att.textContent === 'string' ? att.textContent : null,
-            mime: att.mime ? String(att.mime) : null,
+            mime: minioInfo.mime,
           })
           .run();
       });
     }
 
     for (const c of d.comments || []) {
-      sqliteDb
-        .insert(sqliteComments)
+      const commentText = externalizeInlineImagesToMinio(
+        String(c.text || '').replace(/@Tanjim Islam/g, '@Mohammad Owais'),
+        `comments/${c.id}`,
+      );
+      pgDb
+        .insert(pgComments)
         .values({
           id: String(c.id),
           taskId: String(c.task),
           authorId: String(c.by || 'm1'),
           createdAt: Number(c.at || now),
-          text: String(c.text || '').replace(/@Tanjim Islam/g, '@Mohammad Owais'),
+          text: commentText,
           reactionsJson: JSON.stringify(c.re || {}),
         })
         .run();
@@ -503,8 +520,9 @@ export function populateAllTablesTransaction(store: PersistedStore): number {
           return;
         }
         insertedFileIds.add(fid);
-        sqliteDb
-          .insert(sqliteFiles)
+        const minioInfo = ensureAttachmentStoredInMinio(att, `comments/${c.id}`);
+        pgDb
+          .insert(pgFiles)
           .values({
             id: fid,
             name: String(att.name || 'attachment'),
@@ -515,9 +533,11 @@ export function populateAllTablesTransaction(store: PersistedStore): number {
             projectId: String(att.project || 'p1'),
             taskId: String(c.task),
             commentId: String(c.id),
-            dataUrl: att.dataUrl ? String(att.dataUrl) : null,
+            dataUrl: minioInfo.dataUrl,
+            storageKey: minioInfo.storageKey,
+            bucket: minioInfo.bucket,
             textContent: typeof att.textContent === 'string' ? att.textContent : null,
-            mime: att.mime ? String(att.mime) : null,
+            mime: minioInfo.mime,
           })
           .run();
       });
@@ -527,8 +547,9 @@ export function populateAllTablesTransaction(store: PersistedStore): number {
       const fid = String(f.id || uid('f'));
       if (insertedFileIds.has(fid)) continue;
       insertedFileIds.add(fid);
-      sqliteDb
-        .insert(sqliteFiles)
+      const minioInfo = ensureAttachmentStoredInMinio(f, `projects/${f.project || 'p1'}`);
+      pgDb
+        .insert(pgFiles)
         .values({
           id: fid,
           name: String(f.name || 'file'),
@@ -539,16 +560,18 @@ export function populateAllTablesTransaction(store: PersistedStore): number {
           projectId: String(f.project || 'p1'),
           taskId: f.task ? String(f.task) : null,
           commentId: f.commentId ? String(f.commentId) : null,
-          dataUrl: f.dataUrl ? String(f.dataUrl) : null,
+          dataUrl: minioInfo.dataUrl,
+          storageKey: minioInfo.storageKey,
+          bucket: minioInfo.bucket,
           textContent: typeof f.textContent === 'string' ? f.textContent : null,
-          mime: f.mime ? String(f.mime) : null,
+          mime: minioInfo.mime,
         })
         .run();
     }
 
     for (const n of d.notifs || []) {
-      sqliteDb
-        .insert(sqliteNotifications)
+      pgDb
+        .insert(pgNotifications)
         .values({
           id: String(n.id),
           type: String(n.type || 'mention'),
@@ -564,8 +587,8 @@ export function populateAllTablesTransaction(store: PersistedStore): number {
     }
 
     for (const a of d.activity || []) {
-      sqliteDb
-        .insert(sqliteActivityLogs)
+      pgDb
+        .insert(pgActivityLogs)
         .values({
           id: String(a.id || uid('a')),
           actorId: String(a.by || 'm1'),
@@ -579,8 +602,8 @@ export function populateAllTablesTransaction(store: PersistedStore): number {
     }
 
     for (const sv of d.savedViews || []) {
-      sqliteDb
-        .insert(sqliteSavedViews)
+      pgDb
+        .insert(pgSavedViews)
         .values({
           id: String(sv.id || uid('v')),
           projectId: String(sv.project || 'p1'),
@@ -592,8 +615,8 @@ export function populateAllTablesTransaction(store: PersistedStore): number {
     }
 
     for (const o of d.outbox || []) {
-      sqliteDb
-        .insert(sqliteOutboxEmails)
+      pgDb
+        .insert(pgOutboxEmails)
         .values({
           id: String(o.id || uid('em')),
           memberId: o.memberId ? String(o.memberId) : null,
@@ -625,8 +648,8 @@ export function populateAllTablesTransaction(store: PersistedStore): number {
     }
 
     for (const s of d.sessions || []) {
-      sqliteDb
-        .insert(sqliteSessions)
+      pgDb
+        .insert(pgSessions)
         .values({
           id: String(s.id || uid('ss')),
           device: String(s.device || 'Chrome on macOS'),
@@ -647,7 +670,7 @@ export function populateAllTablesTransaction(store: PersistedStore): number {
    ROW MAPPERS (SQL Row -> API Domain Shape)
    ============================================================================ */
 
-function mapMemberRow(r: typeof sqliteMembers.$inferSelect) {
+function mapMemberRow(r: typeof pgMembers.$inferSelect) {
   return {
     id: r.id,
     ...(r.uid ? { uid: r.uid } : {}),
@@ -670,7 +693,7 @@ function mapMemberRow(r: typeof sqliteMembers.$inferSelect) {
   };
 }
 
-function mapProjectRow(r: typeof sqliteProjects.$inferSelect) {
+function mapProjectRow(r: typeof pgProjects.$inferSelect) {
   return {
     id: r.id,
     key: r.key,
@@ -696,7 +719,7 @@ function mapProjectRow(r: typeof sqliteProjects.$inferSelect) {
   };
 }
 
-function mapFileRow(r: typeof sqliteFiles.$inferSelect) {
+function mapFileRow(r: typeof pgFiles.$inferSelect) {
   return {
     id: r.id,
     name: r.name,
@@ -708,12 +731,14 @@ function mapFileRow(r: typeof sqliteFiles.$inferSelect) {
     task: r.taskId,
     commentId: r.commentId,
     dataUrl: r.dataUrl,
+    storageKey: r.storageKey || null,
+    bucket: r.bucket || MINIO_BUCKET,
     textContent: r.textContent,
     mime: r.mime,
   };
 }
 
-function mapSubtaskRow(r: typeof sqliteSubtasks.$inferSelect) {
+function mapSubtaskRow(r: typeof pgSubtasks.$inferSelect) {
   return {
     id: r.id,
     title: r.title,
@@ -725,7 +750,7 @@ function mapSubtaskRow(r: typeof sqliteSubtasks.$inferSelect) {
 }
 
 function mapTaskRow(
-  r: typeof sqliteTasks.$inferSelect,
+  r: typeof pgTasks.$inferSelect,
   subtasks: any[] = [],
   attachments: any[] = [],
 ) {
@@ -757,7 +782,7 @@ function mapTaskRow(
   };
 }
 
-function mapCommentRow(r: typeof sqliteComments.$inferSelect, attachments: any[] = []) {
+function mapCommentRow(r: typeof pgComments.$inferSelect, attachments: any[] = []) {
   return {
     id: r.id,
     task: r.taskId,
@@ -769,7 +794,7 @@ function mapCommentRow(r: typeof sqliteComments.$inferSelect, attachments: any[]
   };
 }
 
-function mapOutboxRow(r: typeof sqliteOutboxEmails.$inferSelect) {
+function mapOutboxRow(r: typeof pgOutboxEmails.$inferSelect) {
   return {
     id: r.id,
     memberId: r.memberId,
@@ -805,15 +830,15 @@ function mapOutboxRow(r: typeof sqliteOutboxEmails.$inferSelect) {
 
 export function queryWorkspaceMetrics() {
   ensureRelationalDatabaseSeeded();
-  const conn = getSqliteConnection();
-  const wsRow = sqliteDb
+  const conn = getPgConnection();
+  const wsRow = pgDb
     .select({
-      name: sqliteWorkspaces.name,
-      meMemberId: sqliteWorkspaces.meMemberId,
-      updatedAt: sqliteWorkspaces.updatedAt,
+      name: pgWorkspaces.name,
+      meMemberId: pgWorkspaces.meMemberId,
+      updatedAt: pgWorkspaces.updatedAt,
     })
-    .from(sqliteWorkspaces)
-    .where(eq(sqliteWorkspaces.id, 'ws_main'))
+    .from(pgWorkspaces)
+    .where(eq(pgWorkspaces.id, 'ws_main'))
     .get();
 
   const meId = wsRow?.meMemberId || 'm1';
@@ -862,29 +887,29 @@ export function queryWorkspaceMetrics() {
 
 export function queryBootstrapStore(): PersistedStore {
   ensureRelationalDatabaseSeeded();
-  const wsRow = sqliteDb
+  const wsRow = pgDb
     .select()
-    .from(sqliteWorkspaces)
-    .where(eq(sqliteWorkspaces.id, 'ws_main'))
+    .from(pgWorkspaces)
+    .where(eq(pgWorkspaces.id, 'ws_main'))
     .get()!;
 
-  const teamRows = sqliteDb.select().from(sqliteTeams).all();
-  const memberRows = sqliteDb.select().from(sqliteMembers).all();
-  const projectRows = sqliteDb.select().from(sqliteProjects).orderBy(asc(sqliteProjects.sortOrder)).all();
-  const taskRows = sqliteDb.select().from(sqliteTasks).orderBy(asc(sqliteTasks.sortOrder)).all();
-  const subtaskRows = sqliteDb.select().from(sqliteSubtasks).orderBy(asc(sqliteSubtasks.sortOrder)).all();
-  const commentRows = sqliteDb.select().from(sqliteComments).orderBy(asc(sqliteComments.createdAt)).all();
-  const fileRows = sqliteDb.select().from(sqliteFiles).orderBy(desc(sqliteFiles.createdAt)).all();
-  const notifRows = sqliteDb.select().from(sqliteNotifications).orderBy(desc(sqliteNotifications.createdAt)).all();
-  const activityRows = sqliteDb
+  const teamRows = pgDb.select().from(pgTeams).all();
+  const memberRows = pgDb.select().from(pgMembers).all();
+  const projectRows = pgDb.select().from(pgProjects).orderBy(asc(pgProjects.sortOrder)).all();
+  const taskRows = pgDb.select().from(pgTasks).orderBy(asc(pgTasks.sortOrder)).all();
+  const subtaskRows = pgDb.select().from(pgSubtasks).orderBy(asc(pgSubtasks.sortOrder)).all();
+  const commentRows = pgDb.select().from(pgComments).orderBy(asc(pgComments.createdAt)).all();
+  const fileRows = pgDb.select().from(pgFiles).orderBy(desc(pgFiles.createdAt)).all();
+  const notifRows = pgDb.select().from(pgNotifications).orderBy(desc(pgNotifications.createdAt)).all();
+  const activityRows = pgDb
     .select()
-    .from(sqliteActivityLogs)
-    .orderBy(desc(sqliteActivityLogs.createdAt))
+    .from(pgActivityLogs)
+    .orderBy(desc(pgActivityLogs.createdAt))
     .limit(250)
     .all();
-  const savedViewRows = sqliteDb.select().from(sqliteSavedViews).all();
-  const outboxRows = sqliteDb.select().from(sqliteOutboxEmails).orderBy(desc(sqliteOutboxEmails.sentAt)).all();
-  const sessionRows = sqliteDb.select().from(sqliteSessions).all();
+  const savedViewRows = pgDb.select().from(pgSavedViews).all();
+  const outboxRows = pgDb.select().from(pgOutboxEmails).orderBy(desc(pgOutboxEmails.sentAt)).all();
+  const sessionRows = pgDb.select().from(pgSessions).all();
 
   const subtasksByTask = new Map<string, any[]>();
   for (const s of subtaskRows) {
@@ -1006,7 +1031,7 @@ export function queryBootstrapStore(): PersistedStore {
 
 export function queryTasksSql(query: Record<string, any> = {}) {
   ensureRelationalDatabaseSeeded();
-  const conn = getSqliteConnection();
+  const conn = getPgConnection();
   const clauses: string[] = [];
   const params: any[] = [];
 
@@ -1061,22 +1086,22 @@ export function queryTasksSql(query: Record<string, any> = {}) {
        ${whereSql}
        ORDER BY sort_order ASC`,
     )
-    .all(...params) as (typeof sqliteTasks.$inferSelect)[];
+    .all(...params) as (typeof pgTasks.$inferSelect)[];
 
   if (!rawRows.length) return [];
 
   const taskIds = rawRows.map(r => r.id);
-  const subRows = sqliteDb
+  const subRows = pgDb
     .select()
-    .from(sqliteSubtasks)
-    .where(inArray(sqliteSubtasks.taskId, taskIds))
-    .orderBy(asc(sqliteSubtasks.sortOrder))
+    .from(pgSubtasks)
+    .where(inArray(pgSubtasks.taskId, taskIds))
+    .orderBy(asc(pgSubtasks.sortOrder))
     .all();
 
-  const fileRows = sqliteDb
+  const fileRows = pgDb
     .select()
-    .from(sqliteFiles)
-    .where(inArray(sqliteFiles.taskId, taskIds))
+    .from(pgFiles)
+    .where(inArray(pgFiles.taskId, taskIds))
     .all();
 
   const subsByTask = new Map<string, any[]>();
@@ -1099,21 +1124,21 @@ export function queryTasksSql(query: Record<string, any> = {}) {
 
 export function queryTaskByIdSql(taskId: string) {
   ensureRelationalDatabaseSeeded();
-  const row = sqliteDb.select().from(sqliteTasks).where(eq(sqliteTasks.id, taskId)).get();
+  const row = pgDb.select().from(pgTasks).where(eq(pgTasks.id, taskId)).get();
   if (!row) return null;
-  const subRows = sqliteDb
+  const subRows = pgDb
     .select()
-    .from(sqliteSubtasks)
-    .where(eq(sqliteSubtasks.taskId, taskId))
-    .orderBy(asc(sqliteSubtasks.sortOrder))
+    .from(pgSubtasks)
+    .where(eq(pgSubtasks.taskId, taskId))
+    .orderBy(asc(pgSubtasks.sortOrder))
     .all();
-  const fileRows = sqliteDb.select().from(sqliteFiles).where(eq(sqliteFiles.taskId, taskId)).all();
+  const fileRows = pgDb.select().from(pgFiles).where(eq(pgFiles.taskId, taskId)).all();
   return mapTaskRow(row, subRows.map(mapSubtaskRow), fileRows.map(mapFileRow));
 }
 
 export function insertTaskSql(rawInput: Record<string, any>) {
   ensureRelationalDatabaseSeeded();
-  const conn = getSqliteConnection();
+  const conn = getPgConnection();
   const input = stripDangerousKeys(rawInput || {});
   const now = Date.now();
 
@@ -1121,9 +1146,9 @@ export function insertTaskSql(rawInput: Record<string, any>) {
   const tx = conn.transaction(() => {
     let projRow =
       (input.project &&
-        sqliteDb.select().from(sqliteProjects).where(eq(sqliteProjects.id, String(input.project))).get()) ||
-      sqliteDb.select().from(sqliteProjects).where(eq(sqliteProjects.archived, false)).orderBy(asc(sqliteProjects.sortOrder)).get() ||
-      sqliteDb.select().from(sqliteProjects).get();
+        pgDb.select().from(pgProjects).where(eq(pgProjects.id, String(input.project))).get()) ||
+      pgDb.select().from(pgProjects).where(eq(pgProjects.archived, false)).orderBy(asc(pgProjects.sortOrder)).get() ||
+      pgDb.select().from(pgProjects).get();
 
     if (!projRow) {
       throw new Error('No project exists in workspace');
@@ -1132,10 +1157,10 @@ export function insertTaskSql(rawInput: Record<string, any>) {
     const nextSeq = (projRow.seq || 200) + 1;
     let taskKey = typeof input.key === 'string' && input.key.trim() ? input.key.trim() : `${projRow.key}-${nextSeq}`;
     if (!input.key) {
-      sqliteDb
-        .update(sqliteProjects)
+      pgDb
+        .update(pgProjects)
         .set({ seq: nextSeq })
-        .where(eq(sqliteProjects.id, projRow.id))
+        .where(eq(pgProjects.id, projRow.id))
         .run();
     }
 
@@ -1156,8 +1181,11 @@ export function insertTaskSql(rawInput: Record<string, any>) {
     const validStatus =
       rawStatus && ((ST as any)[rawStatus] || /^[a-z0-9_-]{1,50}$/i.test(rawStatus)) ? rawStatus : 'todo';
 
-    sqliteDb
-      .insert(sqliteTasks)
+    const normalizedDesc =
+      typeof input.desc === 'string' ? externalizeInlineImagesToMinio(input.desc, `tasks/${id}`) : '';
+
+    pgDb
+      .insert(pgTasks)
       .values({
         id,
         key: taskKey,
@@ -1174,7 +1202,7 @@ export function insertTaskSql(rawInput: Record<string, any>) {
         depsJson: JSON.stringify(
           Array.isArray(input.deps) ? input.deps.filter((d: any) => typeof d === 'string') : [],
         ),
-        desc: typeof input.desc === 'string' ? input.desc : '',
+        desc: normalizedDesc,
         estimate: input.estimate != null ? String(input.estimate) : null,
         createdAt: typeof input.created === 'number' ? input.created : now,
         updatedAt: now,
@@ -1186,8 +1214,8 @@ export function insertTaskSql(rawInput: Record<string, any>) {
         completedAt: typeof input.completedAt === 'number' ? input.completedAt : null,
         prevStatus: typeof input.prevStatus === 'string' ? input.prevStatus : null,
       })
-      . onConflictDoUpdate({
-        target: sqliteTasks.id,
+      .onConflictDoUpdate({
+        target: pgTasks.id,
         set: {
           title: safeString(input.title, 500, 'Untitled') || 'Untitled',
           updatedAt: now,
@@ -1197,8 +1225,8 @@ export function insertTaskSql(rawInput: Record<string, any>) {
 
     const subtasks = Array.isArray(input.subtasks) ? stripDangerousKeys(input.subtasks) : [];
     subtasks.forEach((s: any, idx: number) => {
-      sqliteDb
-        .insert(sqliteSubtasks)
+      pgDb
+        .insert(pgSubtasks)
         .values({
           id: safeString(s.id, 80) || uid('s'),
           taskId: id,
@@ -1218,8 +1246,9 @@ export function insertTaskSql(rawInput: Record<string, any>) {
     attachments.forEach((att: any) => {
       const fid = safeString(att.id, 80) || uid('f');
       const cleanName = safeString(att.name, 255, 'attachment') || 'attachment';
-      sqliteDb
-        .insert(sqliteFiles)
+      const minioInfo = ensureAttachmentStoredInMinio(att, `tasks/${id}`);
+      pgDb
+        .insert(pgFiles)
         .values({
           id: fid,
           name: cleanName,
@@ -1230,13 +1259,21 @@ export function insertTaskSql(rawInput: Record<string, any>) {
           projectId: projRow.id,
           taskId: id,
           commentId: att.commentId ? String(att.commentId) : null,
-          dataUrl: safeDownloadUrl(att.dataUrl) || null,
+          dataUrl: minioInfo.dataUrl,
+          storageKey: minioInfo.storageKey,
+          bucket: minioInfo.bucket,
           textContent: typeof att.textContent === 'string' ? att.textContent.slice(0, 500000) : null,
-          mime: safeString(att.mime, 100) || null,
+          mime: minioInfo.mime,
         })
         .onConflictDoUpdate({
-          target: sqliteFiles.id,
-          set: { taskId: id, projectId: projRow.id },
+          target: pgFiles.id,
+          set: {
+            taskId: id,
+            projectId: projRow.id,
+            dataUrl: minioInfo.dataUrl,
+            storageKey: minioInfo.storageKey,
+            bucket: minioInfo.bucket,
+          },
         })
         .run();
     });
@@ -1251,7 +1288,7 @@ export function insertTaskSql(rawInput: Record<string, any>) {
 
 export function patchTaskSql(taskId: string, rawPatch: Record<string, any>) {
   ensureRelationalDatabaseSeeded();
-  const conn = getSqliteConnection();
+  const conn = getPgConnection();
   const current = queryTaskByIdSql(taskId);
   if (!current) return null;
 
@@ -1309,7 +1346,7 @@ export function patchTaskSql(taskId: string, rawPatch: Record<string, any>) {
       } else if (k === 'assignee') {
         updateCols.assigneeId = newVal ? String(newVal) : null;
         const m = newVal
-          ? sqliteDb.select().from(sqliteMembers).where(eq(sqliteMembers.id, String(newVal))).get()
+          ? pgDb.select().from(pgMembers).where(eq(pgMembers.id, String(newVal))).get()
           : null;
         insertActivityRow(
           meId,
@@ -1344,17 +1381,17 @@ export function patchTaskSql(taskId: string, rawPatch: Record<string, any>) {
           now,
         );
       } else if (k === 'project') {
-        const projRow = sqliteDb
+        const projRow = pgDb
           .select()
-          .from(sqliteProjects)
-          .where(eq(sqliteProjects.id, String(newVal)))
+          .from(pgProjects)
+          .where(eq(pgProjects.id, String(newVal)))
           .get();
         if (projRow) {
           const nextSeq = (projRow.seq || 200) + 1;
-          sqliteDb
-            .update(sqliteProjects)
+          pgDb
+            .update(pgProjects)
             .set({ seq: nextSeq })
-            .where(eq(sqliteProjects.id, projRow.id))
+            .where(eq(pgProjects.id, projRow.id))
             .run();
           updateCols.projectId = projRow.id;
           updateCols.key = `${projRow.key}-${nextSeq}`;
@@ -1369,7 +1406,8 @@ export function patchTaskSql(taskId: string, rawPatch: Record<string, any>) {
         updateCols.depsJson = JSON.stringify(Array.isArray(newVal) ? newVal : []);
         insertActivityRow(meId, 'updated dependencies of', taskId, current.project, '', now);
       } else if (k === 'desc') {
-        updateCols.desc = typeof newVal === 'string' ? newVal : '';
+        updateCols.desc =
+          typeof newVal === 'string' ? externalizeInlineImagesToMinio(newVal, `tasks/${taskId}`) : '';
       } else if (k === 'estimate') {
         updateCols.estimate = newVal != null ? String(newVal) : null;
         insertActivityRow(meId, 'estimated', taskId, current.project, newVal || 'none', now);
@@ -1395,10 +1433,10 @@ export function patchTaskSql(taskId: string, rawPatch: Record<string, any>) {
       } else if (k === 'prevStatus') {
         updateCols.prevStatus = newVal ? String(newVal) : null;
       } else if (k === 'subtasks' && Array.isArray(newVal)) {
-        sqliteDb.delete(sqliteSubtasks).where(eq(sqliteSubtasks.taskId, taskId)).run();
+        pgDb.delete(pgSubtasks).where(eq(pgSubtasks.taskId, taskId)).run();
         newVal.forEach((s: any, idx: number) => {
-          sqliteDb
-            .insert(sqliteSubtasks)
+          pgDb
+            .insert(pgSubtasks)
             .values({
               id: safeString(s.id, 80) || uid('s'),
               taskId,
@@ -1415,8 +1453,9 @@ export function patchTaskSql(taskId: string, rawPatch: Record<string, any>) {
         newVal.forEach((att: any) => {
           const fid = safeString(att.id, 80) || uid('f');
           const cleanName = safeString(att.name, 255, 'attachment') || 'attachment';
-          sqliteDb
-            .insert(sqliteFiles)
+          const minioInfo = ensureAttachmentStoredInMinio(att, `tasks/${taskId}`);
+          pgDb
+            .insert(pgFiles)
             .values({
               id: fid,
               name: cleanName,
@@ -1427,13 +1466,21 @@ export function patchTaskSql(taskId: string, rawPatch: Record<string, any>) {
               projectId: current.project,
               taskId,
               commentId: att.commentId ? String(att.commentId) : null,
-              dataUrl: safeDownloadUrl(att.dataUrl) || null,
+              dataUrl: minioInfo.dataUrl,
+              storageKey: minioInfo.storageKey,
+              bucket: minioInfo.bucket,
               textContent: typeof att.textContent === 'string' ? att.textContent.slice(0, 500000) : null,
-              mime: safeString(att.mime, 100) || null,
+              mime: minioInfo.mime,
             })
             .onConflictDoUpdate({
-              target: sqliteFiles.id,
-              set: { taskId, projectId: current.project },
+              target: pgFiles.id,
+              set: {
+                taskId,
+                projectId: current.project,
+                dataUrl: minioInfo.dataUrl,
+                storageKey: minioInfo.storageKey,
+                bucket: minioInfo.bucket,
+              },
             })
             .run();
         });
@@ -1441,7 +1488,7 @@ export function patchTaskSql(taskId: string, rawPatch: Record<string, any>) {
     }
 
     updateCols.updatedAt = now;
-    sqliteDb.update(sqliteTasks).set(updateCols).where(eq(sqliteTasks.id, taskId)).run();
+    pgDb.update(pgTasks).set(updateCols).where(eq(pgTasks.id, taskId)).run();
     touchWorkspaceRow(now);
   });
 
@@ -1469,12 +1516,12 @@ export function archiveTaskSql(taskId: string) {
   if (!existing) return null;
   const now = Date.now();
   const meId = getCurrentMeId();
-  const conn = getSqliteConnection();
+  const conn = getPgConnection();
   conn.transaction(() => {
-    sqliteDb
-      .update(sqliteTasks)
+    pgDb
+      .update(pgTasks)
       .set({ archived: true, archivedAt: now, updatedAt: now })
-      .where(eq(sqliteTasks.id, taskId))
+      .where(eq(pgTasks.id, taskId))
       .run();
     insertActivityRow(meId, 'archived', taskId, existing.project, '', now);
     touchWorkspaceRow(now);
@@ -1487,12 +1534,12 @@ export function restoreTaskSql(taskId: string) {
   if (!existing) return null;
   const now = Date.now();
   const meId = getCurrentMeId();
-  const conn = getSqliteConnection();
+  const conn = getPgConnection();
   conn.transaction(() => {
-    sqliteDb
-      .update(sqliteTasks)
+    pgDb
+      .update(pgTasks)
       .set({ archived: false, archivedAt: null, updatedAt: now })
-      .where(eq(sqliteTasks.id, taskId))
+      .where(eq(pgTasks.id, taskId))
       .run();
     insertActivityRow(meId, 'restored', taskId, existing.project, '', now);
     touchWorkspaceRow(now);
@@ -1504,15 +1551,15 @@ export function deleteTasksSql(taskIds: string[]) {
   ensureRelationalDatabaseSeeded();
   const cleanIds = taskIds.map(id => String(id)).filter(Boolean);
   if (!cleanIds.length) return { deleted: 0, updatedAt: Date.now() };
-  const conn = getSqliteConnection();
+  const conn = getPgConnection();
   const now = Date.now();
   let deleted = 0;
 
   conn.transaction(() => {
     const idSet = new Set(cleanIds);
-    sqliteDb.delete(sqliteSubtasks).where(inArray(sqliteSubtasks.taskId, cleanIds)).run();
-    sqliteDb.delete(sqliteComments).where(inArray(sqliteComments.taskId, cleanIds)).run();
-    const res = sqliteDb.delete(sqliteTasks).where(inArray(sqliteTasks.id, cleanIds)).run();
+    pgDb.delete(pgSubtasks).where(inArray(pgSubtasks.taskId, cleanIds)).run();
+    pgDb.delete(pgComments).where(inArray(pgComments.taskId, cleanIds)).run();
+    const res = pgDb.delete(pgTasks).where(inArray(pgTasks.id, cleanIds)).run();
     deleted = res.changes;
 
     // Clean any dependency references pointing to deleted tasks
@@ -1540,10 +1587,10 @@ export function insertSubtaskSql(taskId: string, title: string) {
   ensureRelationalDatabaseSeeded();
   const cleanTitle = safeString(title, 500).trim();
   if (!cleanTitle) return null;
-  const taskRow = sqliteDb.select().from(sqliteTasks).where(eq(sqliteTasks.id, taskId)).get();
+  const taskRow = pgDb.select().from(pgTasks).where(eq(pgTasks.id, taskId)).get();
   if (!taskRow) return null;
 
-  const conn = getSqliteConnection();
+  const conn = getPgConnection();
   const now = Date.now();
   const meId = getCurrentMeId();
   const sid = uid('s');
@@ -1552,8 +1599,8 @@ export function insertSubtaskSql(taskId: string, title: string) {
     const maxRow = conn
       .prepare(`SELECT COALESCE(MAX(sort_order), -1) AS maxO FROM subtasks WHERE task_id = ?`)
       .get(taskId) as { maxO: number };
-    sqliteDb
-      .insert(sqliteSubtasks)
+    pgDb
+      .insert(pgSubtasks)
       .values({
         id: sid,
         taskId,
@@ -1565,30 +1612,30 @@ export function insertSubtaskSql(taskId: string, title: string) {
         sortOrder: Number(maxRow?.maxO ?? -1) + 1,
       })
       .run();
-    sqliteDb.update(sqliteTasks).set({ updatedAt: now }).where(eq(sqliteTasks.id, taskId)).run();
+    pgDb.update(pgTasks).set({ updatedAt: now }).where(eq(pgTasks.id, taskId)).run();
     insertActivityRow(meId, 'added subtask to', taskId, taskRow.projectId, `“${cleanTitle}”`, now);
     touchWorkspaceRow(now);
   })();
 
-  const sub = sqliteDb.select().from(sqliteSubtasks).where(eq(sqliteSubtasks.id, sid)).get()!;
+  const sub = pgDb.select().from(pgSubtasks).where(eq(pgSubtasks.id, sid)).get()!;
   return { subtask: mapSubtaskRow(sub), updatedAt: now };
 }
 
 export function patchSubtaskSql(taskId: string, subtaskId: string, rawPatch: Record<string, any>) {
   ensureRelationalDatabaseSeeded();
-  const taskRow = sqliteDb.select().from(sqliteTasks).where(eq(sqliteTasks.id, taskId)).get();
+  const taskRow = pgDb.select().from(pgTasks).where(eq(pgTasks.id, taskId)).get();
   if (!taskRow) return null;
-  const subRow = sqliteDb
+  const subRow = pgDb
     .select()
-    .from(sqliteSubtasks)
-    .where(and(eq(sqliteSubtasks.id, subtaskId), eq(sqliteSubtasks.taskId, taskId)))
+    .from(pgSubtasks)
+    .where(and(eq(pgSubtasks.id, subtaskId), eq(pgSubtasks.taskId, taskId)))
     .get();
   if (!subRow) return null;
 
   const patch = stripDangerousKeys(rawPatch || {});
   const now = Date.now();
   const meId = getCurrentMeId();
-  const conn = getSqliteConnection();
+  const conn = getPgConnection();
 
   conn.transaction(() => {
     const updates: Record<string, any> = {};
@@ -1612,7 +1659,7 @@ export function patchSubtaskSql(taskId: string, subtaskId: string, rawPatch: Rec
     if ('assignee' in patch) {
       updates.assigneeId = patch.assignee ? String(patch.assignee) : null;
       const m = updates.assigneeId
-        ? sqliteDb.select().from(sqliteMembers).where(eq(sqliteMembers.id, updates.assigneeId)).get()
+        ? pgDb.select().from(pgMembers).where(eq(pgMembers.id, updates.assigneeId)).get()
         : null;
       insertActivityRow(
         meId,
@@ -1636,29 +1683,29 @@ export function patchSubtaskSql(taskId: string, subtaskId: string, rawPatch: Rec
     }
 
     if (Object.keys(updates).length > 0) {
-      sqliteDb.update(sqliteSubtasks).set(updates).where(eq(sqliteSubtasks.id, subtaskId)).run();
+      pgDb.update(pgSubtasks).set(updates).where(eq(pgSubtasks.id, subtaskId)).run();
     }
-    sqliteDb.update(sqliteTasks).set({ updatedAt: now }).where(eq(sqliteTasks.id, taskId)).run();
+    pgDb.update(pgTasks).set({ updatedAt: now }).where(eq(pgTasks.id, taskId)).run();
     touchWorkspaceRow(now);
   })();
 
-  const updated = sqliteDb.select().from(sqliteSubtasks).where(eq(sqliteSubtasks.id, subtaskId)).get()!;
+  const updated = pgDb.select().from(pgSubtasks).where(eq(pgSubtasks.id, subtaskId)).get()!;
   return { subtask: mapSubtaskRow(updated), updatedAt: now };
 }
 
 export function deleteSubtaskSql(taskId: string, subtaskId: string) {
   ensureRelationalDatabaseSeeded();
-  const conn = getSqliteConnection();
+  const conn = getPgConnection();
   const now = Date.now();
   let deleted = false;
   conn.transaction(() => {
-    const res = sqliteDb
-      .delete(sqliteSubtasks)
-      .where(and(eq(sqliteSubtasks.id, subtaskId), eq(sqliteSubtasks.taskId, taskId)))
+    const res = pgDb
+      .delete(pgSubtasks)
+      .where(and(eq(pgSubtasks.id, subtaskId), eq(pgSubtasks.taskId, taskId)))
       .run();
     deleted = res.changes > 0;
     if (deleted) {
-      sqliteDb.update(sqliteTasks).set({ updatedAt: now }).where(eq(sqliteTasks.id, taskId)).run();
+      pgDb.update(pgTasks).set({ updatedAt: now }).where(eq(pgTasks.id, taskId)).run();
       touchWorkspaceRow(now);
     }
   })();
@@ -1669,14 +1716,14 @@ export function promoteSubtaskSql(taskId: string, subtaskId: string) {
   ensureRelationalDatabaseSeeded();
   const taskObj = queryTaskByIdSql(taskId);
   if (!taskObj) return null;
-  const subRow = sqliteDb
+  const subRow = pgDb
     .select()
-    .from(sqliteSubtasks)
-    .where(and(eq(sqliteSubtasks.id, subtaskId), eq(sqliteSubtasks.taskId, taskId)))
+    .from(pgSubtasks)
+    .where(and(eq(pgSubtasks.id, subtaskId), eq(pgSubtasks.taskId, taskId)))
     .get();
   if (!subRow) return null;
 
-  const conn = getSqliteConnection();
+  const conn = getPgConnection();
   const now = Date.now();
   const meId = getCurrentMeId();
   let promotedTask: any = null;
@@ -1693,7 +1740,7 @@ export function promoteSubtaskSql(taskId: string, subtaskId: string) {
       desc: subRow.note ? `<p>${esc(subRow.note)}</p>` : '',
     });
     promotedTask = res.task;
-    sqliteDb.delete(sqliteSubtasks).where(eq(sqliteSubtasks.id, subtaskId)).run();
+    pgDb.delete(pgSubtasks).where(eq(pgSubtasks.id, subtaskId)).run();
     insertActivityRow(meId, 'converted a subtask of', taskId, taskObj.project, `into ${promotedTask.key}`, now);
     touchWorkspaceRow(now);
   })();
@@ -1707,18 +1754,18 @@ export function promoteSubtaskSql(taskId: string, subtaskId: string) {
 
 export function queryTaskCommentsSql(taskId: string) {
   ensureRelationalDatabaseSeeded();
-  const rows = sqliteDb
+  const rows = pgDb
     .select()
-    .from(sqliteComments)
-    .where(eq(sqliteComments.taskId, taskId))
-    .orderBy(asc(sqliteComments.createdAt))
+    .from(pgComments)
+    .where(eq(pgComments.taskId, taskId))
+    .orderBy(asc(pgComments.createdAt))
     .all();
   if (!rows.length) return [];
   const cIds = rows.map(r => r.id);
-  const fileRows = sqliteDb
+  const fileRows = pgDb
     .select()
-    .from(sqliteFiles)
-    .where(inArray(sqliteFiles.commentId, cIds))
+    .from(pgFiles)
+    .where(inArray(pgFiles.commentId, cIds))
     .all();
   const filesByComment = new Map<string, any[]>();
   for (const f of fileRows) {
@@ -1737,7 +1784,7 @@ export function insertCommentSql(
   attachments?: any[],
 ) {
   ensureRelationalDatabaseSeeded();
-  const taskRow = sqliteDb.select().from(sqliteTasks).where(eq(sqliteTasks.id, taskId)).get();
+  const taskRow = pgDb.select().from(pgTasks).where(eq(pgTasks.id, taskId)).get();
   const cleanText = String(text || '').trim();
   const rawAtts = Array.isArray(attachments) ? attachments : [];
   if (!taskRow || (!cleanText && rawAtts.length === 0)) return null;
@@ -1745,12 +1792,14 @@ export function insertCommentSql(
   const author = safeString(byMemberId, 80) || getCurrentMeId();
   const now = Date.now();
   const commentId = uid('c');
-  const conn = getSqliteConnection();
+  const conn = getPgConnection();
+
+  const normalizedCommentText = externalizeInlineImagesToMinio(cleanText, `comments/${commentId}`);
 
   const cleanAttachments = rawAtts.map((rawA: any) => {
     const a = stripDangerousKeys(rawA || {});
-    const safeUrl = safeDownloadUrl(a.dataUrl) || null;
     const cleanName = safeString(a.name, 255, 'attachment') || 'attachment';
+    const minioInfo = ensureAttachmentStoredInMinio(a, `comments/${commentId}`);
     return {
       id: safeString(a.id, 80) || uid('f'),
       name: cleanName,
@@ -1761,28 +1810,30 @@ export function insertCommentSql(
       project: taskRow.projectId,
       task: taskId,
       commentId,
-      dataUrl: safeUrl,
+      dataUrl: minioInfo.dataUrl,
+      storageKey: minioInfo.storageKey,
+      bucket: minioInfo.bucket,
       textContent: typeof a.textContent === 'string' ? a.textContent.slice(0, 500000) : null,
-      mime: safeString(a.mime, 100) || null,
+      mime: minioInfo.mime,
     };
   });
 
   conn.transaction(() => {
-    sqliteDb
-      .insert(sqliteComments)
+    pgDb
+      .insert(pgComments)
       .values({
         id: commentId,
         taskId,
         authorId: author,
         createdAt: now,
-        text: cleanText,
+        text: normalizedCommentText,
         reactionsJson: '{}',
       })
       .run();
 
     for (const att of cleanAttachments) {
-      sqliteDb
-        .insert(sqliteFiles)
+      pgDb
+        .insert(pgFiles)
         .values({
           id: att.id,
           name: att.name,
@@ -1794,17 +1845,26 @@ export function insertCommentSql(
           taskId,
           commentId,
           dataUrl: att.dataUrl,
+          storageKey: att.storageKey,
+          bucket: att.bucket,
           textContent: att.textContent,
           mime: att.mime,
         })
         .onConflictDoUpdate({
-          target: sqliteFiles.id,
-          set: { commentId, taskId, projectId: att.project },
+          target: pgFiles.id,
+          set: {
+            commentId,
+            taskId,
+            projectId: att.project,
+            dataUrl: att.dataUrl,
+            storageKey: att.storageKey,
+            bucket: att.bucket,
+          },
         })
         .run();
     }
 
-    sqliteDb.update(sqliteTasks).set({ updatedAt: now }).where(eq(sqliteTasks.id, taskId)).run();
+    pgDb.update(pgTasks).set({ updatedAt: now }).where(eq(pgTasks.id, taskId)).run();
     insertActivityRow(
       author,
       'commented on',
@@ -1814,11 +1874,11 @@ export function insertCommentSql(
       now,
     );
 
-    const allMembers = sqliteDb.select().from(sqliteMembers).all();
+    const allMembers = pgDb.select().from(pgMembers).all();
     for (const m of allMembers) {
       if (cleanText.toLowerCase().includes(`@${m.name.toLowerCase()}`)) {
-        sqliteDb
-          .insert(sqliteNotifications)
+        pgDb
+          .insert(pgNotifications)
           .values({
             id: uid('n'),
             type: 'mention',
@@ -1843,7 +1903,7 @@ export function insertCommentSql(
       task: taskId,
       by: author,
       at: now,
-      text: cleanText,
+      text: normalizedCommentText,
       attachments: cleanAttachments,
       re: {},
     },
@@ -1854,7 +1914,7 @@ export function insertCommentSql(
 export function deleteCommentSql(commentId: string) {
   ensureRelationalDatabaseSeeded();
   const now = Date.now();
-  const res = sqliteDb.delete(sqliteComments).where(eq(sqliteComments.id, commentId)).run();
+  const res = pgDb.delete(pgComments).where(eq(pgComments.id, commentId)).run();
   if (res.changes > 0) touchWorkspaceRow(now);
   return { ok: res.changes > 0, updatedAt: now };
 }
@@ -1862,7 +1922,7 @@ export function deleteCommentSql(commentId: string) {
 export function toggleCommentReactionSql(commentId: string, emoji: string, memberId?: string) {
   ensureRelationalDatabaseSeeded();
   if (!isSafeEmoji(emoji)) return null;
-  const row = sqliteDb.select().from(sqliteComments).where(eq(sqliteComments.id, commentId)).get();
+  const row = pgDb.select().from(pgComments).where(eq(pgComments.id, commentId)).get();
   if (!row) return null;
 
   const cleanEmoji = emoji.trim();
@@ -1872,14 +1932,14 @@ export function toggleCommentReactionSql(commentId: string, emoji: string, membe
   re[cleanEmoji] = list.includes(actor) ? list.filter(x => x !== actor) : [...list, actor];
 
   const now = Date.now();
-  sqliteDb
-    .update(sqliteComments)
+  pgDb
+    .update(pgComments)
     .set({ reactionsJson: JSON.stringify(re) })
-    .where(eq(sqliteComments.id, commentId))
+    .where(eq(pgComments.id, commentId))
     .run();
   touchWorkspaceRow(now);
 
-  const fileRows = sqliteDb.select().from(sqliteFiles).where(eq(sqliteFiles.commentId, commentId)).all();
+  const fileRows = pgDb.select().from(pgFiles).where(eq(pgFiles.commentId, commentId)).all();
   return {
     comment: {
       id: row.id,
@@ -1899,7 +1959,7 @@ export function toggleCommentReactionSql(commentId: string, emoji: string, membe
    ============================================================================ */
 
 export function computeProjectProgressSql(projectId: string): number {
-  const conn = getSqliteConnection();
+  const conn = getPgConnection();
   const stats = conn
     .prepare(
       `SELECT
@@ -1915,12 +1975,12 @@ export function computeProjectProgressSql(projectId: string): number {
 
 export function listProjectsSql() {
   ensureRelationalDatabaseSeeded();
-  const wsRow = sqliteDb
-    .select({ projOrderJson: sqliteWorkspaces.projOrderJson })
-    .from(sqliteWorkspaces)
-    .where(eq(sqliteWorkspaces.id, 'ws_main'))
+  const wsRow = pgDb
+    .select({ projOrderJson: pgWorkspaces.projOrderJson })
+    .from(pgWorkspaces)
+    .where(eq(pgWorkspaces.id, 'ws_main'))
     .get();
-  const rows = sqliteDb.select().from(sqliteProjects).orderBy(asc(sqliteProjects.sortOrder)).all();
+  const rows = pgDb.select().from(pgProjects).orderBy(asc(pgProjects.sortOrder)).all();
   const projects = rows.map(r => ({
     ...mapProjectRow(r),
     progress: computeProjectProgressSql(r.id),
@@ -1935,7 +1995,7 @@ export function listProjectsSql() {
 
 export function getProjectByIdSql(projectId: string) {
   ensureRelationalDatabaseSeeded();
-  const r = sqliteDb.select().from(sqliteProjects).where(eq(sqliteProjects.id, projectId)).get();
+  const r = pgDb.select().from(pgProjects).where(eq(pgProjects.id, projectId)).get();
   if (!r) return null;
   return {
     ...mapProjectRow(r),
@@ -1950,17 +2010,17 @@ export function insertProjectSql(rawInput: Record<string, any>, tmplId = 'blank'
   const meId = getCurrentMeId();
   const lead = safeString(input.lead, 80) || meId;
   const now = Date.now();
-  const conn = getSqliteConnection();
+  const conn = getPgConnection();
   let pid = '';
 
   conn.transaction(() => {
-    const existingProjs = sqliteDb.select({ id: sqliteProjects.id, key: sqliteProjects.key }).from(sqliteProjects).all();
+    const existingProjs = pgDb.select({ id: pgProjects.id, key: pgProjects.key }).from(pgProjects).all();
     pid = safeString(input.id, 80) || uid('p');
     const key = safeString(input.key, 20) || makeProjectKey(name, existingProjs);
     const members = [...new Set([meId, lead, ...(Array.isArray(input.members) ? input.members : [])])];
 
-    sqliteDb
-      .insert(sqliteProjects)
+    pgDb
+      .insert(pgProjects)
       .values({
         id: pid,
         key,
@@ -1986,25 +2046,25 @@ export function insertProjectSql(rawInput: Record<string, any>, tmplId = 'blank'
         sortOrder: 0,
       })
       .onConflictDoUpdate({
-        target: sqliteProjects.id,
+        target: pgProjects.id,
         set: { name, desc: typeof input.desc === 'string' ? input.desc : 'No description yet.' },
       })
       .run();
 
-    const wsRow = sqliteDb
-      .select({ projOrderJson: sqliteWorkspaces.projOrderJson })
-      .from(sqliteWorkspaces)
-      .where(eq(sqliteWorkspaces.id, 'ws_main'))
+    const wsRow = pgDb
+      .select({ projOrderJson: pgWorkspaces.projOrderJson })
+      .from(pgWorkspaces)
+      .where(eq(pgWorkspaces.id, 'ws_main'))
       .get();
     const order = safeJsonParse<string[]>(wsRow?.projOrderJson, []).filter(x => x !== pid);
     order.unshift(pid);
     order.forEach((id, idx) => {
       conn.prepare(`UPDATE projects SET sort_order = ? WHERE id = ?`).run(idx, id);
     });
-    sqliteDb
-      .update(sqliteWorkspaces)
+    pgDb
+      .update(pgWorkspaces)
       .set({ projOrderJson: JSON.stringify(order), updatedAt: now })
-      .where(eq(sqliteWorkspaces.id, 'ws_main'))
+      .where(eq(pgWorkspaces.id, 'ws_main'))
       .run();
 
     insertActivityRow(meId, 'created project', null, pid, '', now);
@@ -2030,13 +2090,13 @@ export function insertProjectSql(rawInput: Record<string, any>, tmplId = 'blank'
 
 export function patchProjectSql(projectId: string, rawPatch: Record<string, any>) {
   ensureRelationalDatabaseSeeded();
-  const row = sqliteDb.select().from(sqliteProjects).where(eq(sqliteProjects.id, projectId)).get();
+  const row = pgDb.select().from(pgProjects).where(eq(pgProjects.id, projectId)).get();
   if (!row) return null;
 
   const patch = stripDangerousKeys(rawPatch || {});
   const now = Date.now();
   const meId = getCurrentMeId();
-  const conn = getSqliteConnection();
+  const conn = getPgConnection();
 
   conn.transaction(() => {
     const updates: Record<string, any> = {};
@@ -2085,7 +2145,7 @@ export function patchProjectSql(projectId: string, rawPatch: Record<string, any>
     }
 
     if (Object.keys(updates).length > 0) {
-      sqliteDb.update(sqliteProjects).set(updates).where(eq(sqliteProjects.id, projectId)).run();
+      pgDb.update(pgProjects).set(updates).where(eq(pgProjects.id, projectId)).run();
     }
     touchWorkspaceRow(now);
   })();
@@ -2097,7 +2157,7 @@ export function duplicateProjectSql(projectId: string) {
   ensureRelationalDatabaseSeeded();
   const orig = getProjectByIdSql(projectId);
   if (!orig) return null;
-  const conn = getSqliteConnection();
+  const conn = getPgConnection();
   let newProj: any = null;
   const now = Date.now();
 
@@ -2131,35 +2191,35 @@ export function duplicateProjectSql(projectId: string) {
 
 export function deleteProjectSql(projectId: string) {
   ensureRelationalDatabaseSeeded();
-  const existing = sqliteDb.select().from(sqliteProjects).where(eq(sqliteProjects.id, projectId)).get();
+  const existing = pgDb.select().from(pgProjects).where(eq(pgProjects.id, projectId)).get();
   if (!existing) return { ok: false, updatedAt: Date.now() };
-  const conn = getSqliteConnection();
+  const conn = getPgConnection();
   const now = Date.now();
 
   conn.transaction(() => {
-    const taskIds = sqliteDb
-      .select({ id: sqliteTasks.id })
-      .from(sqliteTasks)
-      .where(eq(sqliteTasks.projectId, projectId))
+    const taskIds = pgDb
+      .select({ id: pgTasks.id })
+      .from(pgTasks)
+      .where(eq(pgTasks.projectId, projectId))
       .all()
       .map(r => r.id);
     if (taskIds.length) {
       deleteTasksSql(taskIds);
     }
-    sqliteDb.delete(sqliteFiles).where(eq(sqliteFiles.projectId, projectId)).run();
-    sqliteDb.delete(sqliteSavedViews).where(eq(sqliteSavedViews.projectId, projectId)).run();
-    sqliteDb.delete(sqliteProjects).where(eq(sqliteProjects.id, projectId)).run();
+    pgDb.delete(pgFiles).where(eq(pgFiles.projectId, projectId)).run();
+    pgDb.delete(pgSavedViews).where(eq(pgSavedViews.projectId, projectId)).run();
+    pgDb.delete(pgProjects).where(eq(pgProjects.id, projectId)).run();
 
-    const wsRow = sqliteDb
-      .select({ projOrderJson: sqliteWorkspaces.projOrderJson })
-      .from(sqliteWorkspaces)
-      .where(eq(sqliteWorkspaces.id, 'ws_main'))
+    const wsRow = pgDb
+      .select({ projOrderJson: pgWorkspaces.projOrderJson })
+      .from(pgWorkspaces)
+      .where(eq(pgWorkspaces.id, 'ws_main'))
       .get();
     const order = safeJsonParse<string[]>(wsRow?.projOrderJson, []).filter(id => id !== projectId);
-    sqliteDb
-      .update(sqliteWorkspaces)
+    pgDb
+      .update(pgWorkspaces)
       .set({ projOrderJson: JSON.stringify(order), updatedAt: now })
-      .where(eq(sqliteWorkspaces.id, 'ws_main'))
+      .where(eq(pgWorkspaces.id, 'ws_main'))
       .run();
   })();
 
@@ -2168,17 +2228,17 @@ export function deleteProjectSql(projectId: string) {
 
 export function reorderProjectsSql(projOrder: string[]) {
   ensureRelationalDatabaseSeeded();
-  const conn = getSqliteConnection();
+  const conn = getPgConnection();
   const now = Date.now();
   const cleanOrder = projOrder.map(String);
   conn.transaction(() => {
     cleanOrder.forEach((id, idx) => {
       conn.prepare(`UPDATE projects SET sort_order = ? WHERE id = ?`).run(idx, id);
     });
-    sqliteDb
-      .update(sqliteWorkspaces)
+    pgDb
+      .update(pgWorkspaces)
       .set({ projOrderJson: JSON.stringify(cleanOrder), updatedAt: now })
-      .where(eq(sqliteWorkspaces.id, 'ws_main'))
+      .where(eq(pgWorkspaces.id, 'ws_main'))
       .run();
   })();
   return { projOrder: cleanOrder, updatedAt: now };
@@ -2190,9 +2250,9 @@ export function reorderProjectsSql(projOrder: string[]) {
 
 export function listTeamsSql() {
   ensureRelationalDatabaseSeeded();
-  return sqliteDb
+  return pgDb
     .select()
-    .from(sqliteTeams)
+    .from(pgTeams)
     .all()
     .map(tm => ({
       id: tm.id,
@@ -2209,7 +2269,7 @@ export function insertTeamSql(rawInput: Record<string, any>) {
   const name = safeString(input.name, 120).trim();
   if (!name) throw new Error('Give the team a name');
 
-  const existing = sqliteDb.select().from(sqliteTeams).all();
+  const existing = pgDb.select().from(pgTeams).all();
   if (existing.some(t => t.name.toLowerCase() === name.toLowerCase())) {
     throw new Error(`A team called “${name}” already exists`);
   }
@@ -2219,11 +2279,11 @@ export function insertTeamSql(rawInput: Record<string, any>) {
   const descText = safeString(input.desc, 500).trim() || 'No description yet.';
   const icon = safeString(input.icon, 40) || 'users';
   const now = Date.now();
-  const conn = getSqliteConnection();
+  const conn = getPgConnection();
 
   conn.transaction(() => {
-    sqliteDb
-      .insert(sqliteTeams)
+    pgDb
+      .insert(pgTeams)
       .values({
         id: teamId,
         name,
@@ -2234,7 +2294,7 @@ export function insertTeamSql(rawInput: Record<string, any>) {
       .run();
     if (Array.isArray(input.members) && input.members.length > 0) {
       const mIds = input.members.map(String);
-      sqliteDb.update(sqliteMembers).set({ teamId }).where(inArray(sqliteMembers.id, mIds)).run();
+      pgDb.update(pgMembers).set({ teamId }).where(inArray(pgMembers.id, mIds)).run();
     }
     touchWorkspaceRow(now);
   })();
@@ -2247,12 +2307,12 @@ export function insertTeamSql(rawInput: Record<string, any>) {
 
 export function patchTeamSql(teamId: string, rawInput: Record<string, any>) {
   ensureRelationalDatabaseSeeded();
-  const row = sqliteDb.select().from(sqliteTeams).where(eq(sqliteTeams.id, teamId)).get();
+  const row = pgDb.select().from(pgTeams).where(eq(pgTeams.id, teamId)).get();
   if (!row) return null;
 
   const input = stripDangerousKeys(rawInput || {});
   const now = Date.now();
-  const conn = getSqliteConnection();
+  const conn = getPgConnection();
 
   conn.transaction(() => {
     const updates: Record<string, any> = {};
@@ -2263,20 +2323,20 @@ export function patchTeamSql(teamId: string, rawInput: Record<string, any>) {
     else if (input.c) updates.color = safeCssColor(input.c, row.color);
 
     if (Object.keys(updates).length > 0) {
-      sqliteDb.update(sqliteTeams).set(updates).where(eq(sqliteTeams.id, teamId)).run();
+      pgDb.update(pgTeams).set(updates).where(eq(pgTeams.id, teamId)).run();
     }
 
     if (Array.isArray(input.members)) {
       const mIds = input.members.map(String);
-      sqliteDb.update(sqliteMembers).set({ teamId: '' }).where(eq(sqliteMembers.teamId, teamId)).run();
+      pgDb.update(pgMembers).set({ teamId: '' }).where(eq(pgMembers.teamId, teamId)).run();
       if (mIds.length > 0) {
-        sqliteDb.update(sqliteMembers).set({ teamId }).where(inArray(sqliteMembers.id, mIds)).run();
+        pgDb.update(pgMembers).set({ teamId }).where(inArray(pgMembers.id, mIds)).run();
       }
     }
     touchWorkspaceRow(now);
   })();
 
-  const updated = sqliteDb.select().from(sqliteTeams).where(eq(sqliteTeams.id, teamId)).get()!;
+  const updated = pgDb.select().from(pgTeams).where(eq(pgTeams.id, teamId)).get()!;
   return {
     team: {
       id: updated.id,
@@ -2291,16 +2351,16 @@ export function patchTeamSql(teamId: string, rawInput: Record<string, any>) {
 
 export function deleteTeamSql(teamId: string) {
   ensureRelationalDatabaseSeeded();
-  const conn = getSqliteConnection();
+  const conn = getPgConnection();
   const now = Date.now();
   let deleted = false;
 
   conn.transaction(() => {
-    const res = sqliteDb.delete(sqliteTeams).where(eq(sqliteTeams.id, teamId)).run();
+    const res = pgDb.delete(pgTeams).where(eq(pgTeams.id, teamId)).run();
     deleted = res.changes > 0;
     if (deleted) {
-      sqliteDb.update(sqliteMembers).set({ teamId: '' }).where(eq(sqliteMembers.teamId, teamId)).run();
-      sqliteDb.update(sqliteProjects).set({ teamId: '' }).where(eq(sqliteProjects.teamId, teamId)).run();
+      pgDb.update(pgMembers).set({ teamId: '' }).where(eq(pgMembers.teamId, teamId)).run();
+      pgDb.update(pgProjects).set({ teamId: '' }).where(eq(pgProjects.teamId, teamId)).run();
       touchWorkspaceRow(now);
     }
   })();
@@ -2314,16 +2374,16 @@ export function deleteTeamSql(teamId: string) {
 
 export function listMembersAndOutboxSql() {
   ensureRelationalDatabaseSeeded();
-  const wsRow = sqliteDb
-    .select({ meMemberId: sqliteWorkspaces.meMemberId, smtpConfigJson: sqliteWorkspaces.smtpConfigJson })
-    .from(sqliteWorkspaces)
-    .where(eq(sqliteWorkspaces.id, 'ws_main'))
+  const wsRow = pgDb
+    .select({ meMemberId: pgWorkspaces.meMemberId, smtpConfigJson: pgWorkspaces.smtpConfigJson })
+    .from(pgWorkspaces)
+    .where(eq(pgWorkspaces.id, 'ws_main'))
     .get();
-  const members = sqliteDb.select().from(sqliteMembers).all().map(mapMemberRow);
-  const outbox = sqliteDb
+  const members = pgDb.select().from(pgMembers).all().map(mapMemberRow);
+  const outbox = pgDb
     .select()
-    .from(sqliteOutboxEmails)
-    .orderBy(desc(sqliteOutboxEmails.sentAt))
+    .from(pgOutboxEmails)
+    .orderBy(desc(pgOutboxEmails.sentAt))
     .all()
     .map(mapOutboxRow);
   const smtpConfig = safeJsonParse<any>(wsRow?.smtpConfigJson, null);
@@ -2340,16 +2400,16 @@ function createOutboxRecordForMember(
   baseUrl: string,
   projectName = '',
 ) {
-  const wsRow = sqliteDb
-    .select({ name: sqliteWorkspaces.name, meMemberId: sqliteWorkspaces.meMemberId })
-    .from(sqliteWorkspaces)
-    .where(eq(sqliteWorkspaces.id, 'ws_main'))
+  const wsRow = pgDb
+    .select({ name: pgWorkspaces.name, meMemberId: pgWorkspaces.meMemberId })
+    .from(pgWorkspaces)
+    .where(eq(pgWorkspaces.id, 'ws_main'))
     .get();
   const wsName = sanitizeHeaderValue(wsRow?.name || 'Snapsec', 100) || 'Snapsec';
-  const meRow = sqliteDb
+  const meRow = pgDb
     .select()
-    .from(sqliteMembers)
-    .where(eq(sqliteMembers.id, wsRow?.meMemberId || 'm1'))
+    .from(pgMembers)
+    .where(eq(pgMembers.id, wsRow?.meMemberId || 'm1'))
     .get();
   const inviter = meRow || { name: 'Mohammad Owais', email: 'mohammadowais616@gmail.com' };
 
@@ -2399,8 +2459,8 @@ function createOutboxRecordForMember(
   const now = Date.now();
   const outboxId = uid('em');
 
-  sqliteDb
-    .insert(sqliteOutboxEmails)
+  pgDb
+    .insert(pgOutboxEmails)
     .values({
       id: outboxId,
       memberId: member.id,
@@ -2425,15 +2485,15 @@ function createOutboxRecordForMember(
     })
     .run();
 
-  sqliteDb
-    .update(sqliteMembers)
+  pgDb
+    .update(pgMembers)
     .set({
       inviteToken,
       inviteUrl,
       lastInviteId: outboxId,
       invitedAt: now,
     })
-    .where(eq(sqliteMembers.id, member.id))
+    .where(eq(pgMembers.id, member.id))
     .run();
 
   member.inviteToken = inviteToken;
@@ -2441,7 +2501,7 @@ function createOutboxRecordForMember(
   member.lastInviteId = outboxId;
   member.invitedAt = now;
 
-  const row = sqliteDb.select().from(sqliteOutboxEmails).where(eq(sqliteOutboxEmails.id, outboxId)).get()!;
+  const row = pgDb.select().from(pgOutboxEmails).where(eq(pgOutboxEmails.id, outboxId)).get()!;
   return mapOutboxRow(row);
 }
 
@@ -2453,7 +2513,7 @@ export function inviteMembersSql(
   projectName = '',
 ) {
   ensureRelationalDatabaseSeeded();
-  const conn = getSqliteConnection();
+  const conn = getPgConnection();
   const now = Date.now();
   const invited: any[] = [];
   const outboxItems: any[] = [];
@@ -2475,8 +2535,8 @@ export function inviteMembersSql(
           .split('@')[0]
           .replace(/[._-]+/g, ' ')
           .replace(/\b\w/g, c => c.toUpperCase());
-        sqliteDb
-          .insert(sqliteMembers)
+        pgDb
+          .insert(pgMembers)
           .values({
             id: memberId,
             name: derivedName,
@@ -2492,18 +2552,18 @@ export function inviteMembersSql(
           })
           .run();
       } else {
-        sqliteDb
-          .update(sqliteMembers)
+        pgDb
+          .update(pgMembers)
           .set({
             role: role || existingRow.role,
             teamId: team || existingRow.team_id,
             inviteToken: existingRow.invite_token || uid('inv'),
           })
-          .where(eq(sqliteMembers.id, memberId))
+          .where(eq(pgMembers.id, memberId))
           .run();
       }
 
-      const mRow = sqliteDb.select().from(sqliteMembers).where(eq(sqliteMembers.id, memberId)).get()!;
+      const mRow = pgDb.select().from(pgMembers).where(eq(pgMembers.id, memberId)).get()!;
       const mapped = mapMemberRow(mRow);
       const outboxItem = createOutboxRecordForMember(mapped, baseUrl, projectName);
       invited.push(mapped);
@@ -2517,9 +2577,9 @@ export function inviteMembersSql(
 
 export function createResendInviteSql(memberId: string, baseUrl = '', projectName = '') {
   ensureRelationalDatabaseSeeded();
-  const mRow = sqliteDb.select().from(sqliteMembers).where(eq(sqliteMembers.id, memberId)).get();
+  const mRow = pgDb.select().from(pgMembers).where(eq(pgMembers.id, memberId)).get();
   if (!mRow) return null;
-  const conn = getSqliteConnection();
+  const conn = getPgConnection();
   const now = Date.now();
   let emailObj: any = null;
   let mapped: any = null;
@@ -2534,8 +2594,8 @@ export function createResendInviteSql(memberId: string, baseUrl = '', projectNam
 export function updateOutboxItemDeliverySql(outboxItem: any) {
   if (!outboxItem?.id) return;
   const now = Date.now();
-  sqliteDb
-    .update(sqliteOutboxEmails)
+  pgDb
+    .update(pgOutboxEmails)
     .set({
       status: String(outboxItem.status || 'sent'),
       transport: outboxItem.transport ? String(outboxItem.transport) : null,
@@ -2545,17 +2605,17 @@ export function updateOutboxItemDeliverySql(outboxItem: any) {
       transportError: outboxItem.transportError ? String(outboxItem.transportError) : null,
       oauthError: outboxItem.oauthError ? String(outboxItem.oauthError) : null,
     })
-    .where(eq(sqliteOutboxEmails.id, String(outboxItem.id)))
+    .where(eq(pgOutboxEmails.id, String(outboxItem.id)))
     .run();
   touchWorkspaceRow(now);
 }
 
 export function getOutboxEmailsSql() {
   ensureRelationalDatabaseSeeded();
-  const rows = sqliteDb
+  const rows = pgDb
     .select()
-    .from(sqliteOutboxEmails)
-    .orderBy(desc(sqliteOutboxEmails.sentAt))
+    .from(pgOutboxEmails)
+    .orderBy(desc(pgOutboxEmails.sentAt))
     .all();
   return rows.map(mapOutboxRow);
 }
@@ -2564,7 +2624,7 @@ export function getInviteByTokenSql(tokenOrEmail: string) {
   ensureRelationalDatabaseSeeded();
   const needle = String(tokenOrEmail || '').trim();
   if (!needle) return null;
-  const conn = getSqliteConnection();
+  const conn = getPgConnection();
   const mRow = conn
     .prepare(
       `SELECT * FROM members
@@ -2573,7 +2633,7 @@ export function getInviteByTokenSql(tokenOrEmail: string) {
     )
     .get(needle, needle) as any;
   if (!mRow) return null;
-  const wsRow = sqliteDb.select().from(sqliteWorkspaces).where(eq(sqliteWorkspaces.id, 'ws_main')).get();
+  const wsRow = pgDb.select().from(pgWorkspaces).where(eq(pgWorkspaces.id, 'ws_main')).get();
   return {
     id: mRow.id,
     name: mRow.name,
@@ -2594,7 +2654,7 @@ export function acceptInviteTokenSql(
   ensureRelationalDatabaseSeeded();
   const needle = String(tokenOrEmail || '').trim();
   if (!needle) return null;
-  const conn = getSqliteConnection();
+  const conn = getPgConnection();
   const mRow = conn
     .prepare(
       `SELECT id FROM members
@@ -2620,37 +2680,37 @@ export function acceptInviteTokenSql(
       memberUpdates.inviteToken = null;
     }
 
-    sqliteDb
-      .update(sqliteMembers)
+    pgDb
+      .update(pgMembers)
       .set(memberUpdates)
-      .where(eq(sqliteMembers.id, mRow.id))
+      .where(eq(pgMembers.id, mRow.id))
       .run();
 
-    const memberFull = sqliteDb.select().from(sqliteMembers).where(eq(sqliteMembers.id, mRow.id)).get()!;
-    const wsRow = sqliteDb.select().from(sqliteWorkspaces).where(eq(sqliteWorkspaces.id, 'ws_main')).get()!;
+    const memberFull = pgDb.select().from(pgMembers).where(eq(pgMembers.id, mRow.id)).get()!;
+    const wsRow = pgDb.select().from(pgWorkspaces).where(eq(pgWorkspaces.id, 'ws_main')).get()!;
     const prefs = { ...DEFAULT_PREFS, ...safeJsonParse<Record<string, any>>(wsRow.prefsJson, {}) };
     prefs.name = memberFull.name;
     if (memberFull.title) prefs.title = memberFull.title;
 
-    sqliteDb
-      .update(sqliteWorkspaces)
+    pgDb
+      .update(pgWorkspaces)
       .set({
         meMemberId: memberFull.id,
         prefsJson: JSON.stringify(prefs),
         updatedAt: now,
       })
-      .where(eq(sqliteWorkspaces.id, 'ws_main'))
+      .where(eq(pgWorkspaces.id, 'ws_main'))
       .run();
 
-    const projs = sqliteDb.select().from(sqliteProjects).all();
+    const projs = pgDb.select().from(pgProjects).all();
     for (const p of projs) {
       const mList = safeJsonParse<string[]>(p.membersJson, []);
       if (!mList.includes(memberFull.id)) {
         mList.push(memberFull.id);
-        sqliteDb
-          .update(sqliteProjects)
+        pgDb
+          .update(pgProjects)
           .set({ membersJson: JSON.stringify(mList) })
-          .where(eq(sqliteProjects.id, p.id))
+          .where(eq(pgProjects.id, p.id))
           .run();
       }
     }
@@ -2665,8 +2725,8 @@ export function acceptInviteTokenSql(
     insertActivityRow(memberFull.id, 'joined the workspace', null, null, memberFull.email, now);
   })();
 
-  const updatedMember = sqliteDb.select().from(sqliteMembers).where(eq(sqliteMembers.id, mRow.id)).get()!;
-  const wsRow = sqliteDb.select().from(sqliteWorkspaces).where(eq(sqliteWorkspaces.id, 'ws_main')).get()!;
+  const updatedMember = pgDb.select().from(pgMembers).where(eq(pgMembers.id, mRow.id)).get()!;
+  const wsRow = pgDb.select().from(pgWorkspaces).where(eq(pgWorkspaces.id, 'ws_main')).get()!;
   const sessionInfo = createAuthSessionSql(updatedMember.id, updatedMember.email, updatedMember.name, opts.userAgent, opts.ip, true);
   return {
     member: mapMemberRow(updatedMember),
@@ -2680,12 +2740,12 @@ export function acceptInviteTokenSql(
 
 export function patchMemberSql(memberId: string, rawPatch: Record<string, any>) {
   ensureRelationalDatabaseSeeded();
-  const row = sqliteDb.select().from(sqliteMembers).where(eq(sqliteMembers.id, memberId)).get();
+  const row = pgDb.select().from(pgMembers).where(eq(pgMembers.id, memberId)).get();
   if (!row) return null;
 
   const patch = stripDangerousKeys(rawPatch || {});
   const now = Date.now();
-  const conn = getSqliteConnection();
+  const conn = getPgConnection();
 
   conn.transaction(() => {
     const updates: Record<string, any> = {};
@@ -2703,51 +2763,51 @@ export function patchMemberSql(memberId: string, rawPatch: Record<string, any>) 
     }
 
     if (Object.keys(updates).length > 0) {
-      sqliteDb.update(sqliteMembers).set(updates).where(eq(sqliteMembers.id, memberId)).run();
+      pgDb.update(pgMembers).set(updates).where(eq(pgMembers.id, memberId)).run();
     }
 
-    const wsRow = sqliteDb.select().from(sqliteWorkspaces).where(eq(sqliteWorkspaces.id, 'ws_main')).get()!;
+    const wsRow = pgDb.select().from(pgWorkspaces).where(eq(pgWorkspaces.id, 'ws_main')).get()!;
     if (memberId === wsRow.meMemberId && (updates.name || updates.title)) {
       const prefs = { ...DEFAULT_PREFS, ...safeJsonParse<Record<string, any>>(wsRow.prefsJson, {}) };
       if (updates.name) prefs.name = updates.name;
       if (updates.title) prefs.title = updates.title;
-      sqliteDb
-        .update(sqliteWorkspaces)
+      pgDb
+        .update(pgWorkspaces)
         .set({ prefsJson: JSON.stringify(prefs), updatedAt: now })
-        .where(eq(sqliteWorkspaces.id, 'ws_main'))
+        .where(eq(pgWorkspaces.id, 'ws_main'))
         .run();
     } else {
       touchWorkspaceRow(now);
     }
   })();
 
-  const updated = sqliteDb.select().from(sqliteMembers).where(eq(sqliteMembers.id, memberId)).get()!;
+  const updated = pgDb.select().from(pgMembers).where(eq(pgMembers.id, memberId)).get()!;
   return { member: mapMemberRow(updated), updatedAt: now };
 }
 
 export function deleteMemberSql(memberId: string) {
   ensureRelationalDatabaseSeeded();
-  const conn = getSqliteConnection();
+  const conn = getPgConnection();
   const now = Date.now();
   let deleted = false;
 
   conn.transaction(() => {
-    const res = sqliteDb.delete(sqliteMembers).where(eq(sqliteMembers.id, memberId)).run();
+    const res = pgDb.delete(pgMembers).where(eq(pgMembers.id, memberId)).run();
     deleted = res.changes > 0;
     if (deleted) {
-      sqliteDb
-        .update(sqliteTasks)
+      pgDb
+        .update(pgTasks)
         .set({ assigneeId: null })
-        .where(eq(sqliteTasks.assigneeId, memberId))
+        .where(eq(pgTasks.assigneeId, memberId))
         .run();
-      const projs = sqliteDb.select().from(sqliteProjects).all();
+      const projs = pgDb.select().from(pgProjects).all();
       for (const p of projs) {
         const mList = safeJsonParse<string[]>(p.membersJson, []);
         if (mList.includes(memberId)) {
-          sqliteDb
-            .update(sqliteProjects)
+          pgDb
+            .update(pgProjects)
             .set({ membersJson: JSON.stringify(mList.filter(id => id !== memberId)) })
-            .where(eq(sqliteProjects.id, p.id))
+            .where(eq(pgProjects.id, p.id))
             .run();
         }
       }
@@ -2767,26 +2827,31 @@ export function listFilesSql(query: Record<string, any> = {}) {
   const clauses = [];
   const projFilter = safeString(query.project, 80);
   const typeFilter = safeString(query.type, 40);
-  if (projFilter) clauses.push(eq(sqliteFiles.projectId, projFilter));
-  if (typeFilter && typeFilter !== 'all') clauses.push(eq(sqliteFiles.type, typeFilter));
+  if (projFilter) clauses.push(eq(pgFiles.projectId, projFilter));
+  if (typeFilter && typeFilter !== 'all') clauses.push(eq(pgFiles.type, typeFilter));
 
   const rows = clauses.length
-    ? sqliteDb
+    ? pgDb
         .select()
-        .from(sqliteFiles)
+        .from(pgFiles)
         .where(and(...clauses))
-        .orderBy(desc(sqliteFiles.createdAt))
+        .orderBy(desc(pgFiles.createdAt))
         .all()
-    : sqliteDb.select().from(sqliteFiles).orderBy(desc(sqliteFiles.createdAt)).all();
+    : pgDb.select().from(pgFiles).orderBy(desc(pgFiles.createdAt)).all();
 
   return rows.map(mapFileRow);
+}
+
+export function getFileByIdSql(fileId: string) {
+  ensureRelationalDatabaseSeeded();
+  const row = pgDb.select().from(pgFiles).where(eq(pgFiles.id, fileId)).get();
+  return row ? mapFileRow(row) : null;
 }
 
 export function insertFileSql(rawInput: Record<string, any>) {
   ensureRelationalDatabaseSeeded();
   const input = stripDangerousKeys(rawInput || {});
   const cleanName = safeString(input.name, 255, 'attachment') || 'attachment';
-  const validDataUrl = safeDownloadUrl(input.dataUrl) || null;
   const meId = getCurrentMeId();
   const now = Date.now();
   const fid = safeString(input.id, 80) || uid('f');
@@ -2797,12 +2862,15 @@ export function insertFileSql(rawInput: Record<string, any>) {
   const sizeStr = safeString(input.size, 40, '120 KB') || '120 KB';
   const authorId = safeString(input.by, 80) || meId;
   const textContent = typeof input.textContent === 'string' ? input.textContent.slice(0, 500000) : null;
-  const mime = safeString(input.mime, 100) || null;
+  const minioInfo = ensureAttachmentStoredInMinio(
+    { ...input, name: cleanName },
+    taskId ? `tasks/${taskId}` : `projects/${projectId}`,
+  );
 
-  const conn = getSqliteConnection();
+  const conn = getPgConnection();
   conn.transaction(() => {
-    sqliteDb
-      .insert(sqliteFiles)
+    pgDb
+      .insert(pgFiles)
       .values({
         id: fid,
         name: cleanName,
@@ -2813,12 +2881,14 @@ export function insertFileSql(rawInput: Record<string, any>) {
         projectId,
         taskId,
         commentId,
-        dataUrl: validDataUrl,
+        dataUrl: minioInfo.dataUrl,
+        storageKey: minioInfo.storageKey,
+        bucket: minioInfo.bucket,
         textContent,
-        mime,
+        mime: minioInfo.mime,
       })
       .onConflictDoUpdate({
-        target: sqliteFiles.id,
+        target: pgFiles.id,
         set: {
           name: cleanName,
           type: fileTypeStr,
@@ -2826,24 +2896,26 @@ export function insertFileSql(rawInput: Record<string, any>) {
           projectId,
           taskId,
           commentId,
-          dataUrl: validDataUrl,
+          dataUrl: minioInfo.dataUrl,
+          storageKey: minioInfo.storageKey,
+          bucket: minioInfo.bucket,
           textContent,
-          mime,
+          mime: minioInfo.mime,
         },
       })
       .run();
 
     if (taskId) {
-      const taskRow = sqliteDb.select().from(sqliteTasks).where(eq(sqliteTasks.id, taskId)).get();
+      const taskRow = pgDb.select().from(pgTasks).where(eq(pgTasks.id, taskId)).get();
       if (taskRow) {
-        sqliteDb.update(sqliteTasks).set({ updatedAt: now }).where(eq(sqliteTasks.id, taskId)).run();
+        pgDb.update(pgTasks).set({ updatedAt: now }).where(eq(pgTasks.id, taskId)).run();
         insertActivityRow(meId, 'added a file to', taskId, taskRow.projectId, cleanName, now);
       }
     }
     touchWorkspaceRow(now);
   })();
 
-  const row = sqliteDb.select().from(sqliteFiles).where(eq(sqliteFiles.id, fid)).get()!;
+  const row = pgDb.select().from(pgFiles).where(eq(pgFiles.id, fid)).get()!;
   return { file: mapFileRow(row), updatedAt: now };
 }
 
@@ -2851,14 +2923,14 @@ export function renameFileSql(fileId: string, newName: string) {
   ensureRelationalDatabaseSeeded();
   const cleanName = safeString(newName, 255).trim();
   if (!cleanName) return null;
-  const row = sqliteDb.select().from(sqliteFiles).where(eq(sqliteFiles.id, fileId)).get();
+  const row = pgDb.select().from(pgFiles).where(eq(pgFiles.id, fileId)).get();
   if (!row) return null;
   const now = Date.now();
   const newType = detectFileType(cleanName);
-  sqliteDb
-    .update(sqliteFiles)
+  pgDb
+    .update(pgFiles)
     .set({ name: cleanName, type: newType })
-    .where(eq(sqliteFiles.id, fileId))
+    .where(eq(pgFiles.id, fileId))
     .run();
   touchWorkspaceRow(now);
   return {
@@ -2869,15 +2941,15 @@ export function renameFileSql(fileId: string, newName: string) {
 
 export function duplicateFileSql(fileId: string) {
   ensureRelationalDatabaseSeeded();
-  const row = sqliteDb.select().from(sqliteFiles).where(eq(sqliteFiles.id, fileId)).get();
+  const row = pgDb.select().from(pgFiles).where(eq(pgFiles.id, fileId)).get();
   if (!row) return null;
   const now = Date.now();
   const newId = uid('f');
   const meId = getCurrentMeId();
   const copyName = row.name.replace(/(\.[^.]+)$/, ' copy$1');
 
-  sqliteDb
-    .insert(sqliteFiles)
+  pgDb
+    .insert(pgFiles)
     .values({
       ...row,
       id: newId,
@@ -2887,15 +2959,21 @@ export function duplicateFileSql(fileId: string) {
     })
     .run();
   touchWorkspaceRow(now);
-  const created = sqliteDb.select().from(sqliteFiles).where(eq(sqliteFiles.id, newId)).get()!;
+  const created = pgDb.select().from(pgFiles).where(eq(pgFiles.id, newId)).get()!;
   return { file: mapFileRow(created), updatedAt: now };
 }
 
 export function deleteFileSql(fileId: string) {
   ensureRelationalDatabaseSeeded();
   const now = Date.now();
-  const res = sqliteDb.delete(sqliteFiles).where(eq(sqliteFiles.id, fileId)).run();
-  if (res.changes > 0) touchWorkspaceRow(now);
+  const existing = pgDb.select().from(pgFiles).where(eq(pgFiles.id, fileId)).get();
+  const res = pgDb.delete(pgFiles).where(eq(pgFiles.id, fileId)).run();
+  if (res.changes > 0) {
+    if (existing?.storageKey) {
+      deleteObjectFromMinio(existing.storageKey).catch(() => {});
+    }
+    touchWorkspaceRow(now);
+  }
   return { ok: res.changes > 0, updatedAt: now };
 }
 
@@ -2905,10 +2983,10 @@ export function deleteFileSql(fileId: string) {
 
 export function listNotificationsSql() {
   ensureRelationalDatabaseSeeded();
-  return sqliteDb
+  return pgDb
     .select()
-    .from(sqliteNotifications)
-    .orderBy(desc(sqliteNotifications.createdAt))
+    .from(pgNotifications)
+    .orderBy(desc(pgNotifications.createdAt))
     .all()
     .map(n => ({
       id: n.id,
@@ -2925,13 +3003,13 @@ export function listNotificationsSql() {
 
 export function markNotificationReadSql(notifId: string, read = true) {
   ensureRelationalDatabaseSeeded();
-  const row = sqliteDb.select().from(sqliteNotifications).where(eq(sqliteNotifications.id, notifId)).get();
+  const row = pgDb.select().from(pgNotifications).where(eq(pgNotifications.id, notifId)).get();
   if (!row) return null;
   const now = Date.now();
-  sqliteDb
-    .update(sqliteNotifications)
+  pgDb
+    .update(pgNotifications)
     .set({ read: Boolean(read) })
-    .where(eq(sqliteNotifications.id, notifId))
+    .where(eq(pgNotifications.id, notifId))
     .run();
   touchWorkspaceRow(now);
   return {
@@ -2953,7 +3031,7 @@ export function markNotificationReadSql(notifId: string, read = true) {
 export function markAllNotificationsReadSql() {
   ensureRelationalDatabaseSeeded();
   const now = Date.now();
-  sqliteDb.update(sqliteNotifications).set({ read: true }).run();
+  pgDb.update(pgNotifications).set({ read: true }).run();
   touchWorkspaceRow(now);
   return { ok: true, updatedAt: now };
 }
@@ -2961,17 +3039,17 @@ export function markAllNotificationsReadSql() {
 export function deleteReadNotificationsSql() {
   ensureRelationalDatabaseSeeded();
   const now = Date.now();
-  sqliteDb.delete(sqliteNotifications).where(eq(sqliteNotifications.read, true)).run();
+  pgDb.delete(pgNotifications).where(eq(pgNotifications.read, true)).run();
   touchWorkspaceRow(now);
   return { notifications: listNotificationsSql(), updatedAt: now };
 }
 
 export function listActivityLogsSql() {
   ensureRelationalDatabaseSeeded();
-  return sqliteDb
+  return pgDb
     .select()
-    .from(sqliteActivityLogs)
-    .orderBy(desc(sqliteActivityLogs.createdAt))
+    .from(pgActivityLogs)
+    .orderBy(desc(pgActivityLogs.createdAt))
     .limit(250)
     .all()
     .map(a => ({
@@ -2996,8 +3074,8 @@ export function insertSavedViewSql(rawInput: Record<string, any>) {
     type: safeString(input.type, 40, 'list') || 'list',
     filters: Array.isArray(input.filters) ? input.filters : [],
   };
-  sqliteDb
-    .insert(sqliteSavedViews)
+  pgDb
+    .insert(pgSavedViews)
     .values({
       id: sv.id,
       projectId: sv.project,
@@ -3006,7 +3084,7 @@ export function insertSavedViewSql(rawInput: Record<string, any>) {
       filtersJson: JSON.stringify(sv.filters),
     })
     .onConflictDoUpdate({
-      target: sqliteSavedViews.id,
+      target: pgSavedViews.id,
       set: { name: sv.name, type: sv.type, filtersJson: JSON.stringify(sv.filters) },
     })
     .run();
@@ -3016,11 +3094,11 @@ export function insertSavedViewSql(rawInput: Record<string, any>) {
 
 export function renameSavedViewSql(viewId: string, name: string) {
   ensureRelationalDatabaseSeeded();
-  const row = sqliteDb.select().from(sqliteSavedViews).where(eq(sqliteSavedViews.id, viewId)).get();
+  const row = pgDb.select().from(pgSavedViews).where(eq(pgSavedViews.id, viewId)).get();
   if (!row) return null;
   const cleanName = safeString(name, 120, row.name).trim() || row.name;
   const now = Date.now();
-  sqliteDb.update(sqliteSavedViews).set({ name: cleanName }).where(eq(sqliteSavedViews.id, viewId)).run();
+  pgDb.update(pgSavedViews).set({ name: cleanName }).where(eq(pgSavedViews.id, viewId)).run();
   touchWorkspaceRow(now);
   return {
     view: {
@@ -3037,14 +3115,14 @@ export function renameSavedViewSql(viewId: string, name: string) {
 export function deleteSavedViewSql(viewId: string) {
   ensureRelationalDatabaseSeeded();
   const now = Date.now();
-  sqliteDb.delete(sqliteSavedViews).where(eq(sqliteSavedViews.id, viewId)).run();
+  pgDb.delete(pgSavedViews).where(eq(pgSavedViews.id, viewId)).run();
   touchWorkspaceRow(now);
   return { ok: true, updatedAt: now };
 }
 
 export function patchPreferencesSql(rawPrefs?: Record<string, any>, rawNotifPrefs?: Record<string, any>) {
   ensureRelationalDatabaseSeeded();
-  const wsRow = sqliteDb.select().from(sqliteWorkspaces).where(eq(sqliteWorkspaces.id, 'ws_main')).get()!;
+  const wsRow = pgDb.select().from(pgWorkspaces).where(eq(pgWorkspaces.id, 'ws_main')).get()!;
   const prefs = {
     ...DEFAULT_PREFS,
     ...safeJsonParse<Record<string, any>>(wsRow.prefsJson, {}),
@@ -3055,14 +3133,14 @@ export function patchPreferencesSql(rawPrefs?: Record<string, any>, rawNotifPref
     ...(rawNotifPrefs && typeof rawNotifPrefs === 'object' ? stripDangerousKeys(rawNotifPrefs) : {}),
   };
   const now = Date.now();
-  sqliteDb
-    .update(sqliteWorkspaces)
+  pgDb
+    .update(pgWorkspaces)
     .set({
       prefsJson: JSON.stringify(prefs),
       notifPrefsJson: JSON.stringify(notifPrefs),
       updatedAt: now,
     })
-    .where(eq(sqliteWorkspaces.id, 'ws_main'))
+    .where(eq(pgWorkspaces.id, 'ws_main'))
     .run();
   return { prefs, notifPrefs, updatedAt: now };
 }
@@ -3070,7 +3148,7 @@ export function patchPreferencesSql(rawPrefs?: Record<string, any>, rawNotifPref
 export function patchWorkspaceSql(rawInput: Record<string, any>) {
   ensureRelationalDatabaseSeeded();
   const input = stripDangerousKeys(rawInput || {});
-  const wsRow = sqliteDb.select().from(sqliteWorkspaces).where(eq(sqliteWorkspaces.id, 'ws_main')).get()!;
+  const wsRow = pgDb.select().from(pgWorkspaces).where(eq(pgWorkspaces.id, 'ws_main')).get()!;
   const oldName = wsRow.name;
   const newName = input.name !== undefined ? safeString(input.name, 120).trim() : wsRow.name;
   const newUrl = input.url
@@ -3114,8 +3192,8 @@ export function patchWorkspaceSql(rawInput: Record<string, any>) {
   }
 
   const now = Date.now();
-  sqliteDb
-    .update(sqliteWorkspaces)
+  pgDb
+    .update(pgWorkspaces)
     .set({
       name: newName,
       url: newUrl,
@@ -3125,7 +3203,7 @@ export function patchWorkspaceSql(rawInput: Record<string, any>) {
       prefsJson: JSON.stringify(currentPrefs),
       updatedAt: now,
     })
-    .where(eq(sqliteWorkspaces.id, 'ws_main'))
+    .where(eq(pgWorkspaces.id, 'ws_main'))
     .run();
 
   return {
@@ -3145,23 +3223,23 @@ export function saveSmtpConfigSql(smtpConfig: {
 }) {
   ensureRelationalDatabaseSeeded();
   const now = Date.now();
-  sqliteDb
-    .update(sqliteWorkspaces)
+  pgDb
+    .update(pgWorkspaces)
     .set({
       smtpConfigJson: JSON.stringify(smtpConfig),
       updatedAt: now,
     })
-    .where(eq(sqliteWorkspaces.id, 'ws_main'))
+    .where(eq(pgWorkspaces.id, 'ws_main'))
     .run();
   return now;
 }
 
 export function getSmtpConfigSql() {
   ensureRelationalDatabaseSeeded();
-  const wsRow = sqliteDb
-    .select({ smtpConfigJson: sqliteWorkspaces.smtpConfigJson })
-    .from(sqliteWorkspaces)
-    .where(eq(sqliteWorkspaces.id, 'ws_main'))
+  const wsRow = pgDb
+    .select({ smtpConfigJson: pgWorkspaces.smtpConfigJson })
+    .from(pgWorkspaces)
+    .where(eq(pgWorkspaces.id, 'ws_main'))
     .get();
   return safeJsonParse<any>(wsRow?.smtpConfigJson, null);
 }
@@ -3183,28 +3261,28 @@ export function authenticateWorkspaceUserSql(profile: {
       .replace(/[._-]+/g, ' ')
       .replace(/\b\w/g, c => c.toUpperCase());
 
-  const conn = getSqliteConnection();
+  const conn = getPgConnection();
   const now = Date.now();
   let targetMemberId = 'm1';
 
   conn.transaction(() => {
     const existing =
       (profile.uid &&
-        sqliteDb
+        pgDb
           .select()
-          .from(sqliteMembers)
-          .where(eq(sqliteMembers.uid, String(profile.uid)))
+          .from(pgMembers)
+          .where(eq(pgMembers.uid, String(profile.uid)))
           .get()) ||
       (conn.prepare(`SELECT * FROM members WHERE LOWER(email) = LOWER(?) LIMIT 1`).get(email) as any);
 
     if (!existing) {
       const ownerRow =
-        sqliteDb.select().from(sqliteMembers).where(eq(sqliteMembers.id, 'm1')).get() ||
-        sqliteDb.select().from(sqliteMembers).get();
+        pgDb.select().from(pgMembers).where(eq(pgMembers.id, 'm1')).get() ||
+        pgDb.select().from(pgMembers).get();
       if (ownerRow) {
         targetMemberId = ownerRow.id;
-        sqliteDb
-          .update(sqliteMembers)
+        pgDb
+          .update(pgMembers)
           .set({
             name: derivedName,
             email,
@@ -3213,12 +3291,12 @@ export function authenticateWorkspaceUserSql(profile: {
             status: 'active',
             lastSeen: 0,
           })
-          .where(eq(sqliteMembers.id, targetMemberId))
+          .where(eq(pgMembers.id, targetMemberId))
           .run();
       } else {
         targetMemberId = 'm1';
-        sqliteDb
-          .insert(sqliteMembers)
+        pgDb
+          .insert(pgMembers)
           .values({
             id: 'm1',
             uid: profile.uid ? safeString(profile.uid, 128) : null,
@@ -3238,8 +3316,8 @@ export function authenticateWorkspaceUserSql(profile: {
     } else {
       targetMemberId = existing.id;
       const safePhoto = safeImageSrc(profile.photoURL);
-      sqliteDb
-        .update(sqliteMembers)
+      pgDb
+        .update(pgMembers)
         .set({
           ...(profile.name && String(profile.name).trim()
             ? { name: safeString(profile.name, 120).trim() }
@@ -3250,42 +3328,42 @@ export function authenticateWorkspaceUserSql(profile: {
           status: 'active',
           lastSeen: 0,
         })
-        .where(eq(sqliteMembers.id, targetMemberId))
+        .where(eq(pgMembers.id, targetMemberId))
         .run();
     }
 
-    const memberRow = sqliteDb.select().from(sqliteMembers).where(eq(sqliteMembers.id, targetMemberId)).get()!;
-    const wsRow = sqliteDb.select().from(sqliteWorkspaces).where(eq(sqliteWorkspaces.id, 'ws_main')).get()!;
+    const memberRow = pgDb.select().from(pgMembers).where(eq(pgMembers.id, targetMemberId)).get()!;
+    const wsRow = pgDb.select().from(pgWorkspaces).where(eq(pgWorkspaces.id, 'ws_main')).get()!;
     const prefs = { ...DEFAULT_PREFS, ...safeJsonParse<Record<string, any>>(wsRow.prefsJson, {}) };
     prefs.name = memberRow.name;
     if (memberRow.title) prefs.title = memberRow.title;
 
-    sqliteDb
-      .update(sqliteWorkspaces)
+    pgDb
+      .update(pgWorkspaces)
       .set({
         meMemberId: targetMemberId,
         prefsJson: JSON.stringify(prefs),
         updatedAt: now,
       })
-      .where(eq(sqliteWorkspaces.id, 'ws_main'))
+      .where(eq(pgWorkspaces.id, 'ws_main'))
       .run();
 
-    const projs = sqliteDb.select().from(sqliteProjects).all();
+    const projs = pgDb.select().from(pgProjects).all();
     for (const p of projs) {
       const mList = safeJsonParse<string[]>(p.membersJson, []);
       if (!mList.includes(targetMemberId)) {
         mList.unshift(targetMemberId);
-        sqliteDb
-          .update(sqliteProjects)
+        pgDb
+          .update(pgProjects)
           .set({ membersJson: JSON.stringify(mList) })
-          .where(eq(sqliteProjects.id, p.id))
+          .where(eq(pgProjects.id, p.id))
           .run();
       }
     }
   })();
 
-  const memberRow = sqliteDb.select().from(sqliteMembers).where(eq(sqliteMembers.id, targetMemberId)).get()!;
-  const wsRow = sqliteDb.select().from(sqliteWorkspaces).where(eq(sqliteWorkspaces.id, 'ws_main')).get()!;
+  const memberRow = pgDb.select().from(pgMembers).where(eq(pgMembers.id, targetMemberId)).get()!;
+  const wsRow = pgDb.select().from(pgWorkspaces).where(eq(pgWorkspaces.id, 'ws_main')).get()!;
   return {
     user: mapMemberRow(memberRow),
     me: wsRow.meMemberId,
@@ -3329,7 +3407,7 @@ export function createAuthSessionSql(
   rememberMe = true,
 ) {
   ensureRelationalDatabaseSeeded();
-  const conn = getSqliteConnection();
+  const conn = getPgConnection();
   const now = Date.now();
   const sessionId = uid('ss');
   const auth = generateAuthToken({ email, name, id: memberId, sessionId }, rememberMe);
@@ -3338,8 +3416,8 @@ export function createAuthSessionSql(
 
   conn.transaction(() => {
     conn.prepare(`UPDATE sessions SET is_current = 0 WHERE member_id = ?`).run(memberId);
-    sqliteDb
-      .insert(sqliteSessions)
+    pgDb
+      .insert(pgSessions)
       .values({
         id: sessionId,
         token: auth.token,
@@ -3377,12 +3455,12 @@ export function createEmailVerificationRecordSql(
   baseUrl = 'http://localhost:4000',
 ) {
   ensureRelationalDatabaseSeeded();
-  const conn = getSqliteConnection();
+  const conn = getPgConnection();
   const cleanEmail = String(email || '').trim().toLowerCase();
   const verifyToken = generateOtpCode();
   const cleanBase = sanitizeBaseUrl(baseUrl, 'http://localhost:4000');
   const verifyUrl = `${cleanBase}/?verify=${encodeURIComponent(verifyToken)}&email=${encodeURIComponent(cleanEmail)}#verify`;
-  const wsRow = sqliteDb.select().from(sqliteWorkspaces).where(eq(sqliteWorkspaces.id, 'ws_main')).get()!;
+  const wsRow = pgDb.select().from(pgWorkspaces).where(eq(pgWorkspaces.id, 'ws_main')).get()!;
   const wsName = wsRow?.name || 'Snapsec';
   const now = Date.now();
   const outboxId = uid('em');
@@ -3406,17 +3484,17 @@ export function createEmailVerificationRecordSql(
   </div>`;
 
   conn.transaction(() => {
-    sqliteDb
-      .update(sqliteMembers)
+    pgDb
+      .update(pgMembers)
       .set({
         verifyToken,
         emailVerified: false,
       })
-      .where(eq(sqliteMembers.id, memberId))
+      .where(eq(pgMembers.id, memberId))
       .run();
 
-    sqliteDb
-      .insert(sqliteOutboxEmails)
+    pgDb
+      .insert(pgOutboxEmails)
       .values({
         id: outboxId,
         memberId,
@@ -3438,7 +3516,7 @@ export function createEmailVerificationRecordSql(
       .run();
   })();
 
-  const outboxRow = sqliteDb.select().from(sqliteOutboxEmails).where(eq(sqliteOutboxEmails.id, outboxId)).get()!;
+  const outboxRow = pgDb.select().from(pgOutboxEmails).where(eq(pgOutboxEmails.id, outboxId)).get()!;
   return {
     otp: verifyToken,
     verifyToken,
@@ -3456,7 +3534,7 @@ export function signupUserSql(input: {
   baseUrl?: string;
 }) {
   ensureRelationalDatabaseSeeded();
-  const conn = getSqliteConnection();
+  const conn = getPgConnection();
   const email = String(input.email || '').trim().toLowerCase();
   const name = safeString(input.name, 120).trim();
   if (!isSnapsecCompanyEmail(email)) {
@@ -3492,15 +3570,15 @@ export function signupUserSql(input: {
   const verifyToken = generateOtpCode();
   const cleanBase = sanitizeBaseUrl(input.baseUrl, 'http://localhost:4000');
   const verifyUrl = `${cleanBase}/?verify=${encodeURIComponent(verifyToken)}&email=${encodeURIComponent(email)}#verify`;
-  const wsRow = sqliteDb.select().from(sqliteWorkspaces).where(eq(sqliteWorkspaces.id, 'ws_main')).get()!;
+  const wsRow = pgDb.select().from(pgWorkspaces).where(eq(pgWorkspaces.id, 'ws_main')).get()!;
   const wsName = wsRow?.name || 'Snapsec';
   const outboxId = uid('em');
 
   conn.transaction(() => {
     if (existing) {
       targetMemberId = existing.id;
-      sqliteDb
-        .update(sqliteMembers)
+      pgDb
+        .update(pgMembers)
         .set({
           name: name || existing.name,
           email,
@@ -3511,11 +3589,11 @@ export function signupUserSql(input: {
           lastSeen: 0,
           inviteToken: null,
         })
-        .where(eq(sqliteMembers.id, targetMemberId))
+        .where(eq(pgMembers.id, targetMemberId))
         .run();
     } else {
-      sqliteDb
-        .insert(sqliteMembers)
+      pgDb
+        .insert(pgMembers)
         .values({
           id: targetMemberId,
           name,
@@ -3552,8 +3630,8 @@ export function signupUserSql(input: {
       <div style="font-size:11.5px;color:#9CA3AF">Sent by ${esc(wsName)} TaskTracker · Security &amp; Engineering Workspace</div>
     </div>`;
 
-    sqliteDb
-      .insert(sqliteOutboxEmails)
+    pgDb
+      .insert(pgOutboxEmails)
       .values({
         id: outboxId,
         memberId: targetMemberId,
@@ -3574,15 +3652,15 @@ export function signupUserSql(input: {
       })
       .run();
 
-    const projs = sqliteDb.select().from(sqliteProjects).all();
+    const projs = pgDb.select().from(pgProjects).all();
     for (const p of projs) {
       const mList = safeJsonParse<string[]>(p.membersJson, []);
       if (!mList.includes(targetMemberId)) {
         mList.unshift(targetMemberId);
-        sqliteDb
-          .update(sqliteProjects)
+        pgDb
+          .update(pgProjects)
           .set({ membersJson: JSON.stringify(mList) })
-          .where(eq(sqliteProjects.id, p.id))
+          .where(eq(pgProjects.id, p.id))
           .run();
       }
     }
@@ -3590,8 +3668,8 @@ export function signupUserSql(input: {
 
   ensureSeedAccountSql();
 
-  const memberRow = sqliteDb.select().from(sqliteMembers).where(eq(sqliteMembers.id, targetMemberId)).get()!;
-  const outboxRow = sqliteDb.select().from(sqliteOutboxEmails).where(eq(sqliteOutboxEmails.id, outboxId)).get();
+  const memberRow = pgDb.select().from(pgMembers).where(eq(pgMembers.id, targetMemberId)).get()!;
+  const outboxRow = pgDb.select().from(pgOutboxEmails).where(eq(pgOutboxEmails.id, outboxId)).get();
 
   return {
     ok: true as const,
@@ -3618,7 +3696,7 @@ export function verifyEmailTokenSql(input: {
   ip?: string;
 }) {
   ensureRelationalDatabaseSeeded();
-  const conn = getSqliteConnection();
+  const conn = getPgConnection();
   const token = String(input.otp || input.token || '').trim();
   const email = String(input.email || '').trim().toLowerCase();
 
@@ -3642,37 +3720,37 @@ export function verifyEmailTokenSql(input: {
   }
 
   const now = Date.now();
-  const wsRow = sqliteDb.select().from(sqliteWorkspaces).where(eq(sqliteWorkspaces.id, 'ws_main')).get()!;
+  const wsRow = pgDb.select().from(pgWorkspaces).where(eq(pgWorkspaces.id, 'ws_main')).get()!;
   const prefs = { ...DEFAULT_PREFS, ...safeJsonParse<Record<string, any>>(wsRow.prefsJson, {}) };
   prefs.name = member.name;
   if (member.title) prefs.title = member.title;
 
   conn.transaction(() => {
-    sqliteDb
-      .update(sqliteMembers)
+    pgDb
+      .update(pgMembers)
       .set({
         emailVerified: true,
         verifyToken: null,
         status: 'active',
         lastSeen: 0,
       })
-      .where(eq(sqliteMembers.id, member.id))
+      .where(eq(pgMembers.id, member.id))
       .run();
 
-    sqliteDb
-      .update(sqliteWorkspaces)
+    pgDb
+      .update(pgWorkspaces)
       .set({
         meMemberId: member.id,
         prefsJson: JSON.stringify(prefs),
         updatedAt: now,
       })
-      .where(eq(sqliteWorkspaces.id, 'ws_main'))
+      .where(eq(pgWorkspaces.id, 'ws_main'))
       .run();
 
     conn.prepare(`UPDATE outbox_emails SET status = 'accepted', accepted_at = ? WHERE invite_token = ?`).run(now, token);
   })();
 
-  const updated = sqliteDb.select().from(sqliteMembers).where(eq(sqliteMembers.id, member.id)).get()!;
+  const updated = pgDb.select().from(pgMembers).where(eq(pgMembers.id, member.id)).get()!;
   const mapped = mapMemberRow(updated);
   const sessionInfo = createAuthSessionSql(
     updated.id,
@@ -3699,7 +3777,7 @@ export function verifyEmailTokenSql(input: {
 
 export function resendVerificationEmailSql(email: string, baseUrl = 'http://localhost:4000') {
   ensureRelationalDatabaseSeeded();
-  const conn = getSqliteConnection();
+  const conn = getPgConnection();
   const cleanEmail = String(email || '').trim().toLowerCase();
   const member = conn.prepare(`SELECT * FROM members WHERE LOWER(email) = LOWER(?) LIMIT 1`).get(cleanEmail) as any;
   if (!member) {
@@ -3722,7 +3800,7 @@ export function loginUserSql(input: {
   ip?: string;
 }) {
   ensureRelationalDatabaseSeeded();
-  const conn = getSqliteConnection();
+  const conn = getPgConnection();
   const email = String(input.email || '').trim().toLowerCase();
   const password = String(input.password || '');
   const now = Date.now();
@@ -3799,30 +3877,30 @@ export function loginUserSql(input: {
 
   const targetMemberId = existing.id;
   conn.transaction(() => {
-    sqliteDb
-      .update(sqliteMembers)
+    pgDb
+      .update(pgMembers)
       .set({ status: 'active', lastSeen: 0 })
-      .where(eq(sqliteMembers.id, targetMemberId))
+      .where(eq(pgMembers.id, targetMemberId))
       .run();
 
-    const wsRow = sqliteDb.select().from(sqliteWorkspaces).where(eq(sqliteWorkspaces.id, 'ws_main')).get()!;
+    const wsRow = pgDb.select().from(pgWorkspaces).where(eq(pgWorkspaces.id, 'ws_main')).get()!;
     const prefs = { ...DEFAULT_PREFS, ...safeJsonParse<Record<string, any>>(wsRow.prefsJson, {}) };
     prefs.name = existing.name;
     if (existing.title) prefs.title = existing.title;
 
-    sqliteDb
-      .update(sqliteWorkspaces)
+    pgDb
+      .update(pgWorkspaces)
       .set({
         meMemberId: targetMemberId,
         prefsJson: JSON.stringify(prefs),
         updatedAt: now,
       })
-      .where(eq(sqliteWorkspaces.id, 'ws_main'))
+      .where(eq(pgWorkspaces.id, 'ws_main'))
       .run();
   })();
 
-  const memberRow = sqliteDb.select().from(sqliteMembers).where(eq(sqliteMembers.id, targetMemberId)).get()!;
-  const wsRow = sqliteDb.select().from(sqliteWorkspaces).where(eq(sqliteWorkspaces.id, 'ws_main')).get()!;
+  const memberRow = pgDb.select().from(pgMembers).where(eq(pgMembers.id, targetMemberId)).get()!;
+  const wsRow = pgDb.select().from(pgWorkspaces).where(eq(pgWorkspaces.id, 'ws_main')).get()!;
   const sessionInfo = createAuthSessionSql(
     memberRow.id,
     memberRow.email,
@@ -3850,7 +3928,7 @@ export function verifySessionTokenSql(token: string) {
   if (!check.valid || !check.payload) {
     return { valid: false as const, reason: check.reason || 'Invalid token' };
   }
-  const conn = getSqliteConnection();
+  const conn = getPgConnection();
   const payload = check.payload;
 
   // Verify session row if sessionId is embedded in JWT
@@ -3869,7 +3947,7 @@ export function verifySessionTokenSql(token: string) {
 
   const memberRow = (
     payload.sub
-      ? sqliteDb.select().from(sqliteMembers).where(eq(sqliteMembers.id, payload.sub)).get()
+      ? pgDb.select().from(pgMembers).where(eq(pgMembers.id, payload.sub)).get()
       : null
   ) || (conn.prepare(`SELECT * FROM members WHERE LOWER(email) = LOWER(?) LIMIT 1`).get(payload.email) as any);
 
@@ -3878,9 +3956,9 @@ export function verifySessionTokenSql(token: string) {
   }
 
   const mapped = 'teamId' in memberRow ? mapMemberRow(memberRow) : mapMemberRow(
-    sqliteDb.select().from(sqliteMembers).where(eq(sqliteMembers.id, memberRow.id)).get()!,
+    pgDb.select().from(pgMembers).where(eq(pgMembers.id, memberRow.id)).get()!,
   );
-  const wsRow = sqliteDb.select().from(sqliteWorkspaces).where(eq(sqliteWorkspaces.id, 'ws_main')).get()!;
+  const wsRow = pgDb.select().from(pgWorkspaces).where(eq(pgWorkspaces.id, 'ws_main')).get()!;
   return {
     valid: true as const,
     user: mapped,
@@ -3893,7 +3971,7 @@ export function verifySessionTokenSql(token: string) {
 export function logoutSessionTokenSql(token: string) {
   ensureRelationalDatabaseSeeded();
   if (!token) return { ok: true };
-  const conn = getSqliteConnection();
+  const conn = getPgConnection();
   const check = verifyAuthToken(token);
   if (check.payload?.sid) {
     conn.prepare(`DELETE FROM sessions WHERE id = ?`).run(check.payload.sid);
@@ -3905,7 +3983,7 @@ export function logoutSessionTokenSql(token: string) {
 export function createPasswordResetTokenSql(rawEmail: string, baseUrl = 'http://localhost:4000') {
   ensureRelationalDatabaseSeeded();
   const email = String(rawEmail || '').trim().toLowerCase();
-  const conn = getSqliteConnection();
+  const conn = getPgConnection();
   const existing = conn
     .prepare(`SELECT * FROM members WHERE LOWER(email) = LOWER(?) LIMIT 1`)
     .get(email) as any;
@@ -3923,7 +4001,7 @@ export function createPasswordResetTokenSql(rawEmail: string, baseUrl = 'http://
   const resetExpiresAt = Date.now() + 30 * 60 * 1000; // 30 minutes
   const cleanBase = sanitizeBaseUrl(baseUrl, 'http://localhost:4000');
   const resetUrl = `${cleanBase}/?reset=${encodeURIComponent(resetToken)}&email=${encodeURIComponent(existing.email)}#reset`;
-  const wsRow = sqliteDb.select().from(sqliteWorkspaces).where(eq(sqliteWorkspaces.id, 'ws_main')).get()!;
+  const wsRow = pgDb.select().from(pgWorkspaces).where(eq(pgWorkspaces.id, 'ws_main')).get()!;
   const wsName = wsRow?.name || 'Snapsec';
   const now = Date.now();
   const outboxId = uid('em');
@@ -3940,17 +4018,17 @@ export function createPasswordResetTokenSql(rawEmail: string, baseUrl = 'http://
   </div>`;
 
   conn.transaction(() => {
-    sqliteDb
-      .update(sqliteMembers)
+    pgDb
+      .update(pgMembers)
       .set({
         resetToken,
         resetExpiresAt,
       })
-      .where(eq(sqliteMembers.id, existing.id))
+      .where(eq(pgMembers.id, existing.id))
       .run();
 
-    sqliteDb
-      .insert(sqliteOutboxEmails)
+    pgDb
+      .insert(pgOutboxEmails)
       .values({
         id: outboxId,
         memberId: existing.id,
@@ -3972,7 +4050,7 @@ export function createPasswordResetTokenSql(rawEmail: string, baseUrl = 'http://
       .run();
   })();
 
-  const outboxRow = sqliteDb.select().from(sqliteOutboxEmails).where(eq(sqliteOutboxEmails.id, outboxId)).get()!;
+  const outboxRow = pgDb.select().from(pgOutboxEmails).where(eq(pgOutboxEmails.id, outboxId)).get()!;
   return {
     ok: true as const,
     email: existing.email,
@@ -3988,7 +4066,7 @@ export function resetPasswordWithTokenSql(input: {
   password: string;
 }) {
   ensureRelationalDatabaseSeeded();
-  const conn = getSqliteConnection();
+  const conn = getPgConnection();
   const token = String(input.token || '').trim();
   const email = String(input.email || '').trim().toLowerCase();
   const now = Date.now();
@@ -4015,7 +4093,7 @@ export function resetPasswordWithTokenSql(input: {
   } else if (email) {
     member = conn.prepare(`SELECT * FROM members WHERE LOWER(email) = LOWER(?) LIMIT 1`).get(email);
   } else if (isTestRuntime()) {
-    member = sqliteDb.select().from(sqliteMembers).get();
+    member = pgDb.select().from(pgMembers).get();
   }
 
   if (!member) {
@@ -4028,15 +4106,15 @@ export function resetPasswordWithTokenSql(input: {
   }
 
   const pwHash = hashPassword(input.password);
-  sqliteDb
-    .update(sqliteMembers)
+  pgDb
+    .update(pgMembers)
     .set({
       passwordHash: pwHash,
       resetToken: null,
       resetExpiresAt: null,
       status: 'active',
     })
-    .where(eq(sqliteMembers.id, member.id))
+    .where(eq(pgMembers.id, member.id))
     .run();
 
   return { ok: true as const };
@@ -4049,7 +4127,7 @@ export function changeUserPasswordSql(input: {
   newPassword: string;
 }) {
   ensureRelationalDatabaseSeeded();
-  const conn = getSqliteConnection();
+  const conn = getPgConnection();
   const targetId = input.memberId || getCurrentMeId();
   const member =
     (input.email &&
@@ -4073,10 +4151,10 @@ export function changeUserPasswordSql(input: {
   }
 
   const pwHash = hashPassword(input.newPassword);
-  sqliteDb
-    .update(sqliteMembers)
+  pgDb
+    .update(pgMembers)
     .set({ passwordHash: pwHash })
-    .where(eq(sqliteMembers.id, member.id))
+    .where(eq(pgMembers.id, member.id))
     .run();
 
   return { ok: true as const };
@@ -4085,10 +4163,10 @@ export function changeUserPasswordSql(input: {
 export function setTwoFactorSql(enabled: boolean) {
   ensureRelationalDatabaseSeeded();
   const now = Date.now();
-  sqliteDb
-    .update(sqliteWorkspaces)
+  pgDb
+    .update(pgWorkspaces)
     .set({ tfa: Boolean(enabled), updatedAt: now })
-    .where(eq(sqliteWorkspaces.id, 'ws_main'))
+    .where(eq(pgWorkspaces.id, 'ws_main'))
     .run();
   return { tfa: Boolean(enabled), updatedAt: now };
 }
@@ -4096,11 +4174,11 @@ export function setTwoFactorSql(enabled: boolean) {
 export function deleteSessionSql(sessionId: string) {
   ensureRelationalDatabaseSeeded();
   const now = Date.now();
-  sqliteDb.delete(sqliteSessions).where(eq(sqliteSessions.id, sessionId)).run();
+  pgDb.delete(pgSessions).where(eq(pgSessions.id, sessionId)).run();
   touchWorkspaceRow(now);
-  const sessions = sqliteDb
+  const sessions = pgDb
     .select()
-    .from(sqliteSessions)
+    .from(pgSessions)
     .all()
     .map(s => ({
       id: s.id,
@@ -4117,15 +4195,15 @@ export function deleteOtherSessionsSql(keepSessionId?: string) {
   ensureRelationalDatabaseSeeded();
   const now = Date.now();
   if (keepSessionId) {
-    const conn = getSqliteConnection();
+    const conn = getPgConnection();
     conn.prepare(`DELETE FROM sessions WHERE id != ?`).run(keepSessionId);
   } else {
-    sqliteDb.delete(sqliteSessions).where(eq(sqliteSessions.isCurrent, false)).run();
+    pgDb.delete(pgSessions).where(eq(pgSessions.isCurrent, false)).run();
   }
   touchWorkspaceRow(now);
-  const sessions = sqliteDb
+  const sessions = pgDb
     .select()
-    .from(sqliteSessions)
+    .from(pgSessions)
     .all()
     .map(s => ({
       id: s.id,
@@ -4140,7 +4218,7 @@ export function deleteOtherSessionsSql(keepSessionId?: string) {
 
 export function resetDatabaseToDefaultSql() {
   ensureRelationalDatabaseSeeded();
-  const wsRow = sqliteDb.select().from(sqliteWorkspaces).where(eq(sqliteWorkspaces.id, 'ws_main')).get();
+  const wsRow = pgDb.select().from(pgWorkspaces).where(eq(pgWorkspaces.id, 'ws_main')).get();
   const currentPrefs = safeJsonParse<Record<string, any>>(wsRow?.prefsJson, {});
   const initial = createDefaultState();
   if (currentPrefs.theme) initial.prefs.theme = currentPrefs.theme;
@@ -4149,14 +4227,25 @@ export function resetDatabaseToDefaultSql() {
 }
 
 /**
- * Optional PostgreSQL mirror for multi-replica Docker Compose deployments.
+ * Initializes MinIO bucket and hydrates state from PostgreSQL (`snapsec-tasktracker-db`).
+ * Preserves existing PostgreSQL rows across container redeployments and syncs seed state if empty.
  */
 export async function syncPostgresMirrorIfEnabled(): Promise<void> {
-  if (!isPostgresConfigured()) return;
+  await ensureMinioBucket();
+  if (!isPostgresConfigured()) {
+    ensureRelationalDatabaseSeeded();
+    return;
+  }
   try {
-    const pool = createPgPool();
-    await ensurePgSchema(pool);
+    const hydrated = await hydrateFromPostgresPool();
+    if (!hydrated) {
+      ensureRelationalDatabaseSeeded();
+    } else {
+      ensureSeedAccountSql();
+    }
+    await flushToPostgresPool();
   } catch (err) {
-    console.error('PostgreSQL pool sync warning:', err);
+    console.error('PostgreSQL pool initialization warning:', err);
   }
 }
+

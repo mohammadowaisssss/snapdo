@@ -17,13 +17,16 @@ RUN npm install --force
 COPY tsconfig.json ./
 COPY src/ ./src/
 
-# Create writable data directory for sqlite cache/local storage and assign permissions to node user
+# Create writable data directory for persistent volume storage and assign permissions to node user
 RUN mkdir -p /app/data && chown -R node:node /app
+
+VOLUME ["/app/data"]
 
 USER node
 
 ENV NODE_ENV=production \
-    PORT=5000
+    PORT=5000 \
+    DATA_DIR=/app/data
 
 EXPOSE 5000
 

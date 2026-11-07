@@ -727,6 +727,8 @@ export function readFileToRecord(file) {
       by: D().me,
       at: Date.now(),
       dataUrl: null,
+      storageKey: null,
+      bucket: null,
       textContent: null,
     };
 
@@ -736,7 +738,28 @@ export function readFileToRecord(file) {
       mime.startsWith('text/') ||
       mime === 'application/json';
 
-    const finish = () => resolve(rec);
+    const finish = async () => {
+      if (!S.ui.offline && (rec.dataUrl || rec.textContent)) {
+        try {
+          const uploaded = await api.uploadMinioObject({
+            name: rec.name,
+            dataUrl: rec.dataUrl,
+            textContent: rec.textContent,
+            mime: rec.mime,
+            type: rec.type,
+            size: rec.size,
+          });
+          if (uploaded?.url) {
+            rec.dataUrl = uploaded.url;
+            rec.storageKey = uploaded.storageKey || null;
+            rec.bucket = uploaded.bucket || null;
+          }
+        } catch {
+          // Fallback to local dataUrl if MinIO upload endpoint is unreachable
+        }
+      }
+      resolve(rec);
+    };
 
     try {
       const r1 = new FileReader();
@@ -834,6 +857,8 @@ export async function insertFilesInlineInDescription(files, targetId = 'f-desc')
         by: D().me,
         at: now,
         dataUrl: r.dataUrl || null,
+        storageKey: r.storageKey || null,
+        bucket: r.bucket || null,
         textContent: r.textContent || null,
         mime: r.mime || null,
       };

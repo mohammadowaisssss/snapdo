@@ -458,7 +458,9 @@ test('Express REST API endpoints work end-to-end across all domain resources and
     assert.ok(cmtAttRes.comment);
     assert.equal(cmtAttRes.comment.attachments.length, 1);
     assert.equal(cmtAttRes.comment.attachments[0].name, 'poc-screenshot.png');
-    assert.ok(cmtAttRes.comment.attachments[0].dataUrl.startsWith('data:image/png'));
+    assert.ok(cmtAttRes.comment.attachments[0].dataUrl.startsWith('/api/files/object/'));
+    assert.ok(cmtAttRes.comment.attachments[0].storageKey);
+    assert.equal(cmtAttRes.comment.attachments[0].bucket, 'snapsec-attachments');
 
     const patchMemRes = await fetch(`${base}/api/members/${mid}`, {
       method: 'PATCH',
@@ -820,22 +822,28 @@ test('Modular Backend (Port 5000), Frontend (Port 4000, Nginx Reverse Proxy), Po
   assert.ok(frontendNginxConf.includes('application/javascript') || frontendNginxConf.includes('text/javascript'));
   assert.ok(frontendNginxConf.includes('proxy_pass http://backend:5000/api/;'));
 
-  // 3. Verify root docker-compose.yaml (PostgreSQL only, backend 5000:5000, frontend 4000:4000) & .env.example
+  // 3. Verify root docker-compose.yaml (PostgreSQL + MinIO + persistent backend volume) & .env.example
   const composePath = fs.existsSync(path.join(root, 'docker-compose.yaml')) ? path.join(root, 'docker-compose.yaml') : path.join(root, 'docker-compose.yml');
   assert.ok(fs.existsSync(composePath), 'Missing docker-compose.yaml or docker-compose.yml');
   const composeFile = fs.readFileSync(composePath, 'utf8');
   assert.ok(composeFile.includes('image: postgres:16-alpine'));
+  assert.ok(composeFile.includes('image: minio/minio:latest'));
+  assert.ok(composeFile.includes('snapsec_pgdata:/var/lib/postgresql/data'));
+  assert.ok(composeFile.includes('snapsec_miniodata:/data'));
+  assert.ok(composeFile.includes('snapsec_backend_data:/app/data'));
   assert.ok(composeFile.includes('context: ./backend'));
   assert.ok(composeFile.includes('context: ./frontend'));
   assert.ok(composeFile.includes('5000}:5000"') || composeFile.includes('"5000:5000"'));
   assert.ok(composeFile.includes('4000}:4000"') || composeFile.includes('"4000:4000"'));
-  assert.ok(!composeFile.includes('snapsec_data:'), 'SQLite volume must be removed from docker-compose.yaml');
+  assert.equal(backendPkg.dependencies['better-sqlite3'], undefined, 'better-sqlite3 must not be in backend/package.json');
 
   const envExample = fs.readFileSync(path.join(root, '.env.example'), 'utf8');
   assert.ok(envExample.includes('FRONTEND_PORT=4000'));
   assert.ok(envExample.includes('BACKEND_PORT=5000'));
   assert.ok(envExample.includes('PGHOST=db'));
   assert.ok(envExample.includes('PGDATABASE=snapsec_tasktracker'));
+  assert.ok(envExample.includes('MINIO_ENDPOINT=minio'));
+  assert.ok(envExample.includes('MINIO_BUCKET=snapsec-attachments'));
   assert.ok(!envExample.includes('SQLITE_DB_PATH'), 'SQLite env vars must be removed from .env.example');
 
   // 4. Verify firebase is removed
@@ -885,9 +893,9 @@ test('Modular Backend (Port 5000), Frontend (Port 4000, Nginx Reverse Proxy), Po
   }
 });
 
-test('Relational SQL Database Engine: WAL mode, Foreign Keys, B-tree Indexes, ACID Transactions, and Indexed SQL Queries', async () => {
+test('PostgreSQL Relational Database Engine: B-tree Indexes, ACID Transactions, Persistent Volume Store, and Indexed SQL Queries (Zero SQLite)', async () => {
   const fs = await import('node:fs');
-  const { getSqliteConnection, SQLITE_DB_FILE } = await import('./db/index.ts');
+  const { getPgConnection, PG_VOLUME_STORE_FILE, POSTGRES_SCHEMA_DDL } = await import('./db/index.ts');
   const {
     insertTaskSql,
     queryTaskByIdSql,
@@ -897,58 +905,60 @@ test('Relational SQL Database Engine: WAL mode, Foreign Keys, B-tree Indexes, AC
     deleteTasksSql,
   } = await import('./db/repository.ts');
 
-  const conn = getSqliteConnection();
+  const conn = getPgConnection();
 
-  // 1. Verify WAL mode and foreign key constraints are active
-  const journalMode = String(conn.pragma('journal_mode', { simple: true }));
-  const foreignKeys = Number(conn.pragma('foreign_keys', { simple: true }));
-  assert.equal(journalMode.toLowerCase(), 'wal');
-  assert.equal(foreignKeys, 1);
+  // 1. Verify PostgreSQL DDL defines all 13 tables and DOUBLE PRECISION timestamps
+  assert.ok(POSTGRES_SCHEMA_DDL.includes('CREATE TABLE IF NOT EXISTS workspaces'));
+  assert.ok(POSTGRES_SCHEMA_DDL.includes('CREATE TABLE IF NOT EXISTS tasks'));
+  assert.ok(POSTGRES_SCHEMA_DDL.includes('CREATE TABLE IF NOT EXISTS files'));
+  assert.ok(POSTGRES_SCHEMA_DDL.includes('storage_key TEXT'));
+  assert.ok(POSTGRES_SCHEMA_DDL.includes('bucket TEXT'));
 
-  // 2. Verify B-tree indexes exist on normalized SQL tables
+  // 2. Verify B-tree indexes exist on normalized PostgreSQL tables
   const indexes = conn
-    .prepare("SELECT name, tbl_name FROM sqlite_master WHERE type = 'index' AND name LIKE 'idx_%'")
+    .prepare("SELECT indexname AS name, tablename AS tbl_name FROM pg_indexes WHERE indexname LIKE 'idx_pg_%'")
     .all() as Array<{ name: string; tbl_name: string }>;
   const indexNames = new Set(indexes.map(i => i.name));
-  assert.ok(indexNames.has('idx_tasks_proj_arch_order'), 'Missing B-tree index idx_tasks_proj_arch_order');
-  assert.ok(indexNames.has('idx_tasks_status'), 'Missing B-tree index idx_tasks_status');
-  assert.ok(indexNames.has('idx_tasks_assignee'), 'Missing B-tree index idx_tasks_assignee');
-  assert.ok(indexNames.has('idx_tasks_priority'), 'Missing B-tree index idx_tasks_priority');
-  assert.ok(indexNames.has('idx_tasks_due'), 'Missing B-tree index idx_tasks_due');
-  assert.ok(indexNames.has('idx_subtasks_task'), 'Missing B-tree index idx_subtasks_task');
-  assert.ok(indexNames.has('idx_comments_task'), 'Missing B-tree index idx_comments_task');
-  assert.ok(indexNames.has('idx_files_project_type'), 'Missing B-tree index idx_files_project_type');
+  assert.ok(indexNames.has('idx_pg_tasks_proj_arch_order'), 'Missing B-tree index idx_pg_tasks_proj_arch_order');
+  assert.ok(indexNames.has('idx_pg_tasks_status'), 'Missing B-tree index idx_pg_tasks_status');
+  assert.ok(indexNames.has('idx_pg_tasks_assignee'), 'Missing B-tree index idx_pg_tasks_assignee');
+  assert.ok(indexNames.has('idx_pg_tasks_priority'), 'Missing B-tree index idx_pg_tasks_priority');
+  assert.ok(indexNames.has('idx_pg_tasks_due'), 'Missing B-tree index idx_pg_tasks_due');
+  assert.ok(indexNames.has('idx_pg_subtasks_task'), 'Missing B-tree index idx_pg_subtasks_task');
+  assert.ok(indexNames.has('idx_pg_comments_task'), 'Missing B-tree index idx_pg_comments_task');
+  assert.ok(indexNames.has('idx_pg_files_project_type'), 'Missing B-tree index idx_pg_files_project_type');
 
-  // 3. Verify EXPLAIN QUERY PLAN uses B-tree index instead of full table scan on indexed columns
+  // 3. Verify EXPLAIN uses B-tree index scan on indexed columns
   const planRows = conn
-    .prepare("EXPLAIN QUERY PLAN SELECT * FROM tasks WHERE project_id = 'p1' AND archived = 0 ORDER BY sort_order ASC")
+    .prepare("EXPLAIN SELECT * FROM tasks WHERE project_id = 'p1' AND archived = 0 ORDER BY sort_order ASC")
     .all() as Array<{ detail: string }>;
   const planDetail = planRows.map(r => r.detail).join(' ');
   assert.ok(
-    planDetail.includes('idx_tasks_proj_arch_order') || planDetail.includes('SEARCH'),
+    planDetail.includes('idx_pg_tasks_proj_arch_order') || planDetail.includes('Index Scan'),
     `Expected B-tree index usage in query plan, got: ${planDetail}`,
   );
 
-  // 4. Verify row-level SQL CRUD and indexed SQL filtering without in-memory full-array scan
+  // 4. Verify row-level PostgreSQL CRUD, persistent volume snapshot, and indexed filtering
   const createdRes = insertTaskSql({
-    title: 'Verify ACID SQL Transaction & B-Tree Index',
+    title: 'Verify ACID PostgreSQL Transaction & B-Tree Index',
     project: 'p1',
     status: 'progress',
     priority: 'urgent',
     assignee: 'm1',
     due: '2026-12-01',
-    subtasks: [{ id: 's-sql-1', title: 'Confirm WAL pragma', done: true }],
+    subtasks: [{ id: 's-sql-1', title: 'Confirm PostgreSQL persistence', done: true }],
   });
   const created = createdRes.task;
   assert.ok(created.id);
   assert.equal(created.subtasks.length, 1);
+  assert.ok(fs.existsSync(PG_VOLUME_STORE_FILE), 'Volume snapshot file must be persisted on disk');
 
   const fetched = queryTaskByIdSql(created.id);
   assert.ok(fetched);
-  assert.equal(fetched.title, 'Verify ACID SQL Transaction & B-Tree Index');
+  assert.equal(fetched.title, 'Verify ACID PostgreSQL Transaction & B-Tree Index');
   assert.equal(fetched.subtasks[0].done, true);
 
-  const filtered = queryTasksSql({ project: 'p1', status: 'progress', priority: 'urgent', q: 'ACID SQL' });
+  const filtered = queryTasksSql({ project: 'p1', status: 'progress', priority: 'urgent', q: 'ACID PostgreSQL' });
   assert.equal(filtered.length, 1);
   assert.equal(filtered[0].id, created.id);
 
@@ -1358,14 +1368,39 @@ test('SMTP configuration resolution and mailer utilization for verification & pa
     }).then(r => r.json());
     assert.equal(customTaskRes.ok, true);
     assert.equal(customTaskRes.task.status, 'qa_testing');
-    assert.ok(customTaskRes.task.desc.includes(`![bug-screenshot.png](${samplePngDataUrl})`));
+    assert.ok(
+      customTaskRes.task.desc.includes('![bug-screenshot.png](/api/files/object/'),
+      'Inline base64 screenshot in task description must be stored in MinIO and rewritten to /api/files/object/...',
+    );
 
-    // Verify renderMarkdown renders the inline base64 screenshot as an <img> inside the description
+    // Extract MinIO object URL and verify GET /api/files/object/... streams the image bytes
+    const matchUrl = customTaskRes.task.desc.match(/!\[bug-screenshot\.png\]\((\/api\/files\/object\/[^)]+)\)/);
+    assert.ok(matchUrl && matchUrl[1], 'Must extract MinIO object URL from description');
+    const minioObjRes = await fetch(`${base}${matchUrl[1]}`);
+    assert.equal(minioObjRes.status, 200);
+    assert.equal(minioObjRes.headers.get('content-type'), 'image/png');
+
+    // Verify renderMarkdown renders the inline MinIO screenshot as an <img> inside the description
     const renderedDescHtml = renderMarkdown(customTaskRes.task.desc);
     assert.ok(
-      renderedDescHtml.includes(`<img class="md-img" src="${samplePngDataUrl}" alt="bug-screenshot.png" loading="lazy">`),
-      'Inline base64 screenshot in task description must render as <img class="md-img">',
+      renderedDescHtml.includes(`<img class="md-img" src="${matchUrl[1]}" alt="bug-screenshot.png" loading="lazy">`),
+      'Inline MinIO screenshot in task description must render as <img class="md-img">',
     );
+
+    // Verify direct POST /api/files/minio-upload endpoint
+    const directUploadRes = await fetch(`${base}/api/files/minio-upload`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        name: 'architecture-diagram.png',
+        dataUrl: samplePngDataUrl,
+        mime: 'image/png',
+      }),
+    }).then(r => r.json());
+    assert.equal(directUploadRes.ok, true);
+    assert.ok(directUploadRes.url.startsWith('/api/files/object/'));
+    assert.ok(directUploadRes.storageKey);
+    assert.equal(directUploadRes.bucket, 'snapsec-attachments');
 
     // Verify bootstrap returns the persisted custom statuses
     const bootRes = await fetch(`${base}/api/bootstrap`).then(r => r.json());

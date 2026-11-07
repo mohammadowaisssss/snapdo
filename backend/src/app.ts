@@ -2,6 +2,7 @@ import express from 'express';
 import fs from 'node:fs';
 import path from 'node:path';
 import { EXPLICIT_MIME_TYPES } from './config/mime.ts';
+import { flushToPostgresPool, isPostgresConfigured } from './db/index.ts';
 import { ensureRelationalDatabaseSeeded, syncPostgresMirrorIfEnabled } from './db/repository.ts';
 import { payloadSanitizerMiddleware, securityHeadersMiddleware } from './middleware/security.ts';
 import { apiRouter } from './routes/index.ts';
@@ -12,14 +13,35 @@ export function createApp(): express.Express {
   const app = express();
   app.disable('x-powered-by');
 
-  // Ensure normalized SQL tables and B-tree indexes are initialized
+  // Ensure normalized PostgreSQL tables and B-tree indexes are initialized
   ensureRelationalDatabaseSeeded();
   syncPostgresMirrorIfEnabled().catch(() => {});
 
   // Security headers, CORS, explicit static MIME types, JSON body parser, and payload sanitizer
   app.use(securityHeadersMiddleware);
-  app.use(express.json({ limit: '15mb' }));
+  app.use(express.json({ limit: '25mb' }));
   app.use(payloadSanitizerMiddleware);
+
+  // Flush mutating requests to PostgreSQL pool before completing the HTTP response
+  app.use('/api', (req, res, next) => {
+    if (
+      isPostgresConfigured() &&
+      (req.method === 'POST' || req.method === 'PUT' || req.method === 'PATCH' || req.method === 'DELETE')
+    ) {
+      const origJson = res.json.bind(res);
+      res.json = ((body: any) => {
+        flushToPostgresPool()
+          .catch(err => {
+            console.warn('PostgreSQL commit warning:', err?.message || err);
+          })
+          .finally(() => {
+            origJson(body);
+          });
+        return res;
+      }) as any;
+    }
+    next();
+  });
 
   // Mount modular REST API routes under /api
   app.use('/api', apiRouter);

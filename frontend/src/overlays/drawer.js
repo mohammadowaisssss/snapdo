@@ -93,9 +93,9 @@ export function drawerHtml(t) {
                 u.mdPrev?.['desc:' + t.id]
                   ? `<div class="md-body md-preview-box" style="min-height:80px">${(t.desc || '').trim() ? md(t.desc) : '<span class="faint">Nothing to preview yet…</span>'}</div>`
                   : `<textarea class="textarea" id="d-desc" data-in="taskDesc" data-id="${t.id}" rows="4" data-autosize placeholder="Add a description… Supports Markdown (**bold**, *italic*, \`code\`, - [ ] checklists, tables) and inline pasted screenshots (${MOD}+V)" aria-labelledby="d-desc-l" style="border:0;padding:4px 0;background:transparent">${esc(normalizeHtmlToMarkdown(t.desc || ''))}</textarea>${
-                      /!\[[^\]]*\]\((data:image\/[^)]+)\)/.test(t.desc || '')
+                      /!\[[^\]]*\]\(((?:data:image\/|\/api\/files\/object\/|https?:\/\/)[^)]+)\)/.test(t.desc || '')
                         ? `<div class="desc-inline-imgs" style="margin-top:6px;padding-top:6px;border-top:1px dashed var(--border)"><div class="faint" style="font-size:11px;margin-bottom:4px">Inline images in description:</div><div class="md-body">${md(
-                            (t.desc || '').match(/!\[[^\]]*\]\((data:image\/[^)]+)\)/g)?.join('\n\n') || '',
+                            (t.desc || '').match(/!\[[^\]]*\]\(((?:data:image\/|\/api\/files\/object\/|https?:\/\/)[^)]+)\)/g)?.join('\n\n') || '',
                           )}</div></div>`
                         : ''
                     }`

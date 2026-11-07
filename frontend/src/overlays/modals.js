@@ -83,9 +83,9 @@ export function taskModal(m, H) {
         descPrev
           ? `<div class="md-preview-box md-body" style="min-height:76px">${f.desc?.trim() ? md(f.desc) : '<span class="faint">Nothing to preview yet…</span>'}</div>`
           : `<textarea class="textarea" id="f-desc" data-in="form" data-f="desc" placeholder="Add a description with **Markdown**, lists, code, tables, or paste screenshots (${MOD}+V) inline…" rows="4">${esc(f.desc)}</textarea>${
-              /!\[[^\]]*\]\((data:image\/[^)]+)\)/.test(f.desc || '')
+              /!\[[^\]]*\]\(((?:data:image\/|\/api\/files\/object\/|https?:\/\/)[^)]+)\)/.test(f.desc || '')
                 ? `<div class="desc-inline-imgs" style="margin-top:6px;padding:8px 10px;border-radius:6px;border:1px dashed var(--border);background:var(--surface-2)"><div class="faint" style="font-size:11px;margin-bottom:4px">Inline images in description:</div><div class="md-body">${md(
-                    (f.desc || '').match(/!\[[^\]]*\]\((data:image\/[^)]+)\)/g)?.join('\n\n') || '',
+                    (f.desc || '').match(/!\[[^\]]*\]\(((?:data:image\/|\/api\/files\/object\/|https?:\/\/)[^)]+)\)/g)?.join('\n\n') || '',
                   )}</div></div>`
                 : ''
             }`

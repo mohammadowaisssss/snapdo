@@ -52,6 +52,8 @@ export function safeImageSrc(url) {
 export function safePdfSrc(url) {
   if (typeof url !== 'string') return '';
   const trimmed = url.trim().replace(/[\u0000-\u001F\u007F]/g, '');
+  if (/^https?:\/\/[^\s"'<>]+$/i.test(trimmed)) return trimmed;
+  if (/^\/[^\s"'<>]*$/.test(trimmed) && !trimmed.startsWith('//')) return trimmed;
   if (/^data:application\/pdf;base64,[A-Za-z0-9+/=\s]+$/i.test(trimmed)) {
     return trimmed;
   }
@@ -63,6 +65,7 @@ export function safeDownloadUrl(url) {
   const trimmed = url.trim().replace(/[\u0000-\u001F\u007F]/g, '');
   if (!trimmed) return '';
   if (/^https?:\/\/[^\s"'<>]+$/i.test(trimmed)) return trimmed;
+  if (/^\/[^\s"'<>]*$/.test(trimmed) && !trimmed.startsWith('//')) return trimmed;
   if (/^blob:https?:\/\/[^\s"'<>]+$/i.test(trimmed)) return trimmed;
   if (/^data:([a-z0-9!#$&-^_]+\/[a-z0-9!#$&-^_.+]+);base64,[A-Za-z0-9+/=\s]+$/i.test(trimmed)) {
     const mimeMatch = trimmed.match(/^data:([^;]+);base64,/i);

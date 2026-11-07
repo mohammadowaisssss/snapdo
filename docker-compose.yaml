@@ -20,6 +20,28 @@ services:
       retries: 5
       start_period: 5s
 
+  minio:
+    image: minio/minio:latest
+    container_name: snapsec-tasktracker-minio
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-snapsec_minio}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-snapsec_minio_secret}
+    ports:
+      - "${MINIO_PORT:-9000}:9000"
+      - "${MINIO_CONSOLE_PORT:-9001}:9001"
+    volumes:
+      - snapsec_miniodata:/data
+    networks:
+      - snapsec_net
+    healthcheck:
+      test: ["CMD-SHELL", "mc ready local || curl -fsS http://localhost:9000/minio/health/live || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+
   backend:
     build:
       context: ./backend
@@ -29,6 +51,7 @@ services:
     environment:
       NODE_ENV: production
       PORT: 5000
+      DATA_DIR: /app/data
       APP_URL: ${APP_URL:-http://localhost:4000}
       CORS_ORIGIN: ${CORS_ORIGIN:-*}
       PGHOST: ${PGHOST:-db}
@@ -36,6 +59,12 @@ services:
       PGUSER: ${PGUSER:-snapsec}
       PGPASSWORD: ${PGPASSWORD:-snapsec_prod_secret}
       PGDATABASE: ${PGDATABASE:-snapsec_tasktracker}
+      MINIO_ENDPOINT: ${MINIO_ENDPOINT:-minio}
+      MINIO_PORT: ${MINIO_PORT:-9000}
+      MINIO_USE_SSL: ${MINIO_USE_SSL:-false}
+      MINIO_ACCESS_KEY: ${MINIO_ROOT_USER:-snapsec_minio}
+      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-snapsec_minio_secret}
+      MINIO_BUCKET: ${MINIO_BUCKET:-snapsec-attachments}
       SMTP_HOST: ${SMTP_HOST:-}
       SMTP_PORT: ${SMTP_PORT:-465}
       SMTP_USER: ${SMTP_USER:-}
@@ -43,9 +72,13 @@ services:
       SMTP_FROM: ${SMTP_FROM:-mohammadowais616@gmail.com}
     ports:
       - "${BACKEND_PORT:-5000}:5000"
+    volumes:
+      - snapsec_backend_data:/app/data
     depends_on:
       db:
         condition: service_healthy
+      minio:
+        condition: service_started
     networks:
       - snapsec_net
     healthcheck:
@@ -77,6 +110,10 @@ services:
 
 volumes:
   snapsec_pgdata:
+    driver: local
+  snapsec_miniodata:
+    driver: local
+  snapsec_backend_data:
     driver: local
 
 networks:

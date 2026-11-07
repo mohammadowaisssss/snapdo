@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { isPostgresConfigured } from '../db/index.ts';
+import { DATA_DIR } from '../db/index.ts';
 import {
   patchPreferencesSql,
   populateAllTablesTransaction,
@@ -7,6 +7,7 @@ import {
   queryWorkspaceMetrics,
   resetDatabaseToDefaultSql,
 } from '../db/repository.ts';
+import { MINIO_BUCKET } from '../services/minio.ts';
 
 export const healthRouter = Router();
 
@@ -15,7 +16,10 @@ healthRouter.get('/health', (_req, res) => {
   res.json({
     status: 'ok',
     service: 'Snapsec TaskTracker Backend',
-    database: isPostgresConfigured() ? 'postgresql-drizzle' : 'sqlite-wal-drizzle',
+    database: 'postgresql-drizzle',
+    storage: 'minio-s3',
+    bucket: MINIO_BUCKET,
+    dataDir: DATA_DIR,
     updatedAt: metrics.updatedAt,
     metrics,
   });
